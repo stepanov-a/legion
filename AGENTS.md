@@ -159,3 +159,316 @@ const table = sqliteTable("session", {
 - Keep delivery vocabulary explicit. Prompts steer by default and promote at the next safe provider-turn boundary while the current drain requires continuation. An explicit `queue` input remains pending until the Session would otherwise become idle; promote one queued input at that boundary, then reevaluate continuation before promoting another. Promoting any new user input resets the selected agent's provider-turn allowance; a batch of steers resets it once.
 - Keep EventV2 replay owner claims separate from clustered Session execution ownership.
 - Keep the System Context algebra, registry, and built-ins in `src/system-context`; keep Context Source producers with their observed domains, and keep Session History selection plus Context Epoch persistence Session-owned.
+
+## Webhook Integration Pipeline
+
+### Архитектура
+
+```
+Source → POST /webhook/:source
+  → Schema.Unknown (любой JSON-тело)
+  → WebhookContextMiddleware (предоставляет InstanceRef)
+  → handler (generic):
+      1. Парсинг payload (source-specific поля)
+      2. Поиск /user_uploads/... в content → скачивание файлов
+      3. Чтение .legion/integrations.jsonc → source config
+      4. Routing: первое совпадение stream/chat_id → command
+      5. Чтение команды .legion/command/{name}.md
+      6. Рендер шаблона ($SENDER, $STREAM, $TOPIC, $CONTENT, $SOURCE)
+      7. Allow check (whitelist sender_email)
+      8. Выбор модели из frontmatter команды:
+         - model указана → Provider.Service.getModel()
+           - найдена → используется
+           - не найдена → ❌ ошибка
+         - model нет → дефолтный провайдер (opencode-go)
+      9. SessionPrompt.Service.prompt() — всегда, MCP инструменты доступны
+  → 200 { content: "..." } → Source публикует ответ
+```
+
+Все вызовы идут через `SessionPrompt.Service.prompt()`, что даёт:
+- MCP-инструменты (ragflow-proxy, search_retrieval, …)
+- Правильную маршрутизацию провайдера
+- Обработку ошибок
+
+---
+
+### Файлы в `packages/opencode/src/server/routes/instance/httpapi/`
+
+#### `groups/webhook.ts`
+Универсальный эндпоинт `POST /webhook/:source`.
+- `:source` — имя из `integrations.jsonc` (zulip, telegram, …)
+- Payload: `Schema.Unknown` (любой JSON, без валидации)
+- Response: `{ content: string }`
+- Подключен `WebhookContextMiddleware`
+
+#### `handlers/webhook.ts`
+**Основной хендлер.** Вся логика обработки.
+
+**Парсинг payload:**
+- `sender = sender_full_name ?? sender_username ?? from`
+- `content = content ?? text`
+- `stream = display_recipient ?? chat`
+- `sender_email = sender_email`
+
+**Скачивание файлов:**
+- `/user_uploads/...` ссылки ищутся в тексте сообщения через regex
+- Скачиваются с Zulip-сервера через `?api_key=<ключ бота>`
+- Текстовые файлы (по mime или расширению из `TEXT_EXTS`) — содержимое добавляется в промпт (первые 3000 символов)
+- Бинарные — только имя и тип
+- Если для бота нет ключа в `bot_api_keys` — файл пропускается (безопасно)
+
+**Routing:**
+- `.legion/integrations.jsonc` читается на каждый запрос
+- Правила применяются по порядку: первое совпадение → команда
+- Поддерживаются поля `stream` и `chat_id` (для Telegram)
+
+**Парсинг frontmatter команды (regex, не YAML):**
+- `agent` — имя агента opencode
+- `model` — `providerId/modelId`
+- `mcp` — `{ ragflow-proxy: true }` — какие MCP разрешены
+- `allow` — `["user@mail.com", "*@domain.com"]` — whitelist sender_email
+
+**Выбор модели:**
+- Если в frontmatter указана `model: ollama/qwen2.5`:
+  - `Provider.Service.getModel("ollama", "qwen2.5")` — проверяет наличие
+  - Если найдена → передаётся в `sessionPrompt.prompt()`
+  - Если не найдена → возвращается `❌ Модель не найдена`
+- Если model не указана → используется дефолтный провайдер `opencode-go`
+
+**Allow check:**
+- Если `allow: ["a@b.com", "*@domain.com"]` — проверяется sender_email
+- Поддерживаются wildcard: `*@domain.com`, `prefix*`
+- Если allow пустой или отсутствует — доступ открыт всем
+- Если не совпало — `❌ Access denied.`
+
+**MCP-инструменты:**
+- Передаются через `input.tools` в `sessionPrompt.prompt()`
+- Если в frontmatter указано `mcp: { ragflow-proxy: true }` — только указанные
+- Если mcp пустой или отсутствует — все MCP-серверы из конфига
+
+**Логирование:**
+- Синхронный `fs.appendFileSync` в `.legion/integration.log`
+- Каждая стадия: RAW, routing, command, PROMPT, model resolution, RESPONSE
+- Полный текст промпта и ответа
+
+#### `webhook.ts`
+Сборка `PublicWebhookApi` из `WebhookApi`. 4 строки.
+
+#### `server.ts`
+```ts
+import { PublicWebhookApi } from "./webhook"
+import { webhookHandlers } from "./handlers/webhook"
+import { webhookContextLayer } from "./middleware/webhook-context"
+const webhookApiRoutes = HttpApiBuilder.layer(PublicWebhookApi).pipe(
+  Layer.provide(webhookHandlers),
+  Layer.provide(webhookContextLayer),
+)
+// + в Layer.mergeAll
+```
+
+#### `middleware/webhook-context.ts`
+Middleware, которая предоставляет `InstanceRef` для webhook-запросов.
+
+Стандартный `instanceContextLayer` требует `WorkspaceRouteContext` (директория из URL). У публичного вебхука `/webhook/:source` нет workspace в URL, поэтому сделан отдельный middleware, который загружает InstanceRef для фиксированной директории `PROJECT_ROOT`.
+
+Если загрузка не удалась — middleware пропускает запрос без InstanceRef (хендлер работает с дефолтами).
+
+---
+
+### Файлы конфигурации (`.legion/`)
+
+#### `.legion/integrations.jsonc`
+Главный конфиг: источники, routing, bot_api_keys.
+
+```jsonc
+{
+  "sources": [
+    {
+      "name": "zulip",                    // ID источника (совпадает с :source в URL)
+      "type": "webhook",                   // всегда "webhook"
+      "endpoint": "POST /webhook/zulip",   // для справки
+      "zulip_url": "https://zulip.local:8443",     // для скачивания файлов
+      "commands_dir": ".legion/command",            // где лежат .md команды
+      "bot_api_keys": {                             // email бота → API key
+        "bashkati4-bot@zulip.local": "8UXn81E..."
+      },
+      "routing": [
+        { "stream": "admin",     "command": "admin" },
+        { "stream": "research",  "command": "bashkati4" },
+        { "stream": "*",         "command": "bashkati4" }
+      ]
+    }
+  ],
+  "default_command": "bashkati4"
+}
+```
+
+**Поля source:**
+
+| Поле | Обязательное | Описание |
+|------|:-----------:|----------|
+| `name` | да | ID источника, подставляется в `/webhook/{name}` |
+| `endpoint` | нет | Для справки |
+| `zulip_url` | нет | Базовый URL Zulip-сервера для скачивания файлов |
+| `commands_dir` | нет | Путь к .md командам, по умолчанию `.legion/command` |
+| `bot_api_keys` | нет | `{ email: api_key }` для авторизации при скачивании |
+| `routing` | нет | Правила маршрутизации |
+
+**Routing:**
+
+Правила применяются по порядку — первое совпадение побеждает.
+
+```jsonc
+{ "stream": "research",  "command": "research" }
+{ "field": "chat_id", "chat_id": "-100*", "command": "analytics" }
+{ "stream": "*",         "command": "bashkati4" }
+```
+
+| Поле | Описание |
+|------|----------|
+| `field` | Поле для сравнения: `"stream"`, `"chat_id"`. По умолчанию `"stream"` |
+| `stream` / `chat_id` | Значение для сравнения. `"*"` — любое |
+| `command` | Имя .md файла команды (без расширения) |
+
+#### `.legion/command/{name}.md`
+Команды — Markdown-файлы с frontmatter и телом-шаблоном.
+
+**Frontmatter:**
+
+```yaml
+---
+name: bashkati4
+description: "Запрос к агент-онтологу"
+agent: general
+model: ollama/qwen2.5
+mcp: { ragflow-proxy: true }
+allow: ["a@b.com", "*@domain.com"]
+---
+```
+
+| Поле | Описание |
+|------|----------|
+| `name` | Имя команды |
+| `description` | Описание |
+| `agent` | Агент opencode (по умолчанию `general`) |
+| `model` | Модель `providerId/modelId` (опционально). Если указана — ищется в глобальном конфиге, иначе ошибка |
+| `mcp` | Какие MCP-серверы разрешены, `{ ragflow-proxy: true }`. Если не указан — все |
+| `allow` | Whitelist sender_email'ов, `["*@company.com"]`. Если не указан — все |
+
+**Переменные шаблона:**
+
+| Переменная | Откуда |
+|------------|--------|
+| `$SENDER` | `sender_full_name` / `sender_username` / `from` |
+| `$STREAM` | `display_recipient` / `chat` |
+| `$TOPIC` | `topic` |
+| `$CONTENT` | `content` / `text` |
+| `$SOURCE` | `source.name` из конфига |
+
+**Пример:**
+```markdown
+---
+name: bashkati4
+agent: general
+model: ollama/qwen2.5
+---
+
+Пользователь $SENDER написал в канале $STREAM (тема: $TOPIC):
+
+$CONTENT
+
+Твоя задача — отвечать в рамках мышления Башкатыча:
+
+- Начинай не с ответа, а с направления
+- Ищи архитектуру, а не факты
+- Проверяй на жизнеспособность, а не на логичность
+```
+
+#### `.legion/legion.jsonc`
+Provider config для opencode. MCP-серверы (ragflow-proxy) подхватываются `SessionPrompt.Service.prompt()` и доступны агенту.
+
+#### `~/.config/opencode/opencode.json`
+**Глобальный** конфиг opencode. Провайдеры отсюда загружаются при старте сервера (InstanceRef не нужен). Если модель указана в frontmatter команды, она должна быть определена здесь.
+
+```jsonc
+{
+  "provider": {
+    "ollama": {
+      "name": "Ollama",
+      "api": "http://localhost:11434/v1",
+      "npm": "@ai-sdk/openai-compatible",
+      "models": {
+        "qwen2.5": { "id": "qwen2.5:3b", "tools": true }
+      }
+    }
+  }
+}
+```
+
+#### `.legion/integration.log`
+Создаётся автоматически. Не в git. Полный лог каждого вебхука:
+```
+RAW [zulip]: sender=Иван stream=general topic=t contentLen=42
+route: stream="general" -> "bashkati4"
+command: bashkati4 agent=general model=ollama/qwen2.5 mcp={} allow=[] body_chars=211
+PROMPT: ...
+model resolved: ollama/qwen2.5
+RESPONSE total=3387ms chars=38
+Привет!
+```
+
+---
+
+### Как добавить новый источник
+
+1. Добавить блок в `sources[]` `integrations.jsonc`:
+   ```jsonc
+   {
+     "name": "telegram",
+     "type": "webhook",
+     "commands_dir": ".legion/command",
+     "routing": [
+       { "chat_id": "-100*", "command": "analytics" },
+       { "chat_id": "*",     "command": "general" }
+     ]
+   }
+   ```
+2. Создать .md команды в `commands_dir`
+3. Настроить внешнюю систему на `POST /webhook/telegram`
+4. Никаких изменений TypeScript не требуется
+
+### Как добавить команду
+
+1. Создать `.legion/command/{name}.md` с frontmatter и телом
+2. Указать `command: {name}` в routing правиле
+
+### Как работает модель из frontmatter
+
+1. В frontmatter указано `model: ollama/qwen2.5`
+2. Хендлер парсит `ollama/qwen2.5` → `providerID="ollama"`, `modelID="qwen2.5"`
+3. `Provider.Service.getModel("ollama", "qwen2.5")` — ищет в глобальном конфиге
+4. Если найдена → `sessionPrompt.prompt()` использует эту модель
+5. Если не найдена → возвращается `❌ Модель не найдена.`
+
+Провайдер должен быть определён в `~/.config/opencode/opencode.json` (глобальный конфиг), т.к. `Provider.Service` инициализируется при старте сервера.
+
+### Как работает allow (whitelist)
+
+1. В frontmatter указано `allow: ["*@company.com"]`
+2. Хендлер проверяет `sender_email` из payload
+3. Поддерживаются wildcard: `*@company.com`, `prefix*`
+4. Если allow пустой или не указан — доступ открыт всем
+5. Если не совпало — `❌ Access denied.`
+
+### Как работают MCP-инструменты
+
+1. MCP-серверы настраиваются в `.legion/legion.jsonc`
+2. Всегда выполняются через `SessionPrompt.Service.prompt()`, который подхватывает `ToolRegistry` со всеми MCP
+3. Если в frontmatter указано `mcp: { ragflow-proxy: true }` — передаётся как `input.tools`, opencode ограничивает доступные инструменты
+4. Если `mcp` не указан — доступны все инструменты
+
+### Известные ограничения
+
+- `Command.Service` не используется, т.к. требует `InstanceRef` при инициализации. Команды читаются напрямую из `.legion/command/`.
+- Провайдеры из `.legion/legion.jsonc` не загружаются в `Provider.Service` из-за отсутствия `InstanceRef` при старте. Провайдеры должны быть в глобальном `~/.config/opencode/opencode.json`.
+- `SessionPrompt.Service.prompt()` может висеть при использовании медленных моделей (Ollama). Рекомендуется таймаут.
