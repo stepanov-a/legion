@@ -1,0 +1,22 @@
+{
+  "sources": [
+    {
+      "name": "zulip",
+      "type": "webhook",
+      "endpoint": "POST /webhook/zulip",
+      "zulip_url": "https://localhost:8443",
+      "commands_dir": ".legion/command",
+      "bot_api_keys": {
+        "bashkati4-bot@zulip.local": "8UXn81E6mEx5UESvOL8zBupHzlrVoRv1",
+        "adminbotv2-bot@zulip.local": "htDHrsc4k8YLjJqYkxUOr7QfbwPvLPLj"
+      },
+      "routing": [
+        { "stream": "admin",     "command": "admin" },
+        { "stream": "research",  "command": "bashkati4" },
+        { "stream": "general",   "command": "bashkati4" },
+        { "stream": "*",         "command": "bashkati4" }
+      ]
+    }
+  ],
+  "default_command": "bashkati4"
+}
