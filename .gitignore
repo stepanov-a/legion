@@ -25,6 +25,7 @@ a.out
 target
 .scripts
 .direnv/
+.legion/pipeline-execution/*
 
 # Local dev files
 opencode-dev
@@ -32,3 +33,4 @@ UPCOMING_CHANGELOG.md
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+*.log
