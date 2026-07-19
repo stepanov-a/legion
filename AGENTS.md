@@ -311,7 +311,9 @@ Middleware, которая предоставляет `InstanceRef` для webho
 | `endpoint` | нет | Для справки |
 | `zulip_url` | нет | Базовый URL Zulip-сервера для скачивания файлов |
 | `commands_dir` | нет | Путь к .md командам, по умолчанию `.legion/command` |
+| `tokens` | нет | `{ email: token }` для верификации запросов (сравнивается с `payload.token`) |
 | `bot_api_keys` | нет | `{ email: api_key }` для авторизации при скачивании |
+
 | `routing` | нет | Правила маршрутизации |
 
 **Routing:**
@@ -331,7 +333,7 @@ Middleware, которая предоставляет `InstanceRef` для webho
 | `command` | Имя .md файла команды (без расширения) |
 
 #### `.legion/command/{name}.md`
-Команды — Markdown-файлы с frontmatter и телом-шаблоном.
+Команды — inline-определения в `integrations.jsonc` (поле `commands`) или `.md` файлы в `commands_dir`. Inline имеют приоритет.
 
 **Frontmatter:**
 
@@ -405,19 +407,82 @@ Provider config для opencode. MCP-серверы (ragflow-proxy) подхва
 }
 ```
 
-#### `.legion/integration.log`
-Создаётся автоматически. Не в git. Полный лог каждого вебхука:
-```
-RAW [zulip]: sender=Иван stream=general topic=t contentLen=42
-route: stream="general" -> "bashkati4"
-command: bashkati4 agent=general model=ollama/qwen2.5 mcp={} allow=[] body_chars=211
-PROMPT: ...
-model resolved: ollama/qwen2.5
-RESPONSE total=3387ms chars=38
-Привет!
+### RAGFlow (фоновое индексирование)
+
+При указании `ragflow_dataset` в frontmatter команды, каждый загруженный
+текстовый файл автоматически загружается в RAGFlow dataset через `forkDetach`
+(фоновый поток, независимый от HTTP-запроса):
+
+```yaml
+---
+name: bashkati4
+ragflow_dataset: research-papers
+---
 ```
 
----
+API и токен — из `.legion/legion.jsonc`:
+
+### S3 (файловое хранилище)
+
+При указании `s3` в конфиге источника, каждый загруженный файл
+автоматически сохраняется в S3 через `forkDetach` (фоновый Effect-поток,
+независимый от родительского HTTP-запроса):
+
+```jsonc
+"s3": {
+  "bucket": "my-legion-bots",
+  "prefix": "bot-files",
+  "region": "eu-central-1",
+  "endpoint": "https://s3.eu-central-1.amazonaws.com"
+}
+```
+
+Путь в S3: `{prefix}/{command}/{source}/{message_id}/{filename}`.
+Credentials — из AWS SDK chain (env vars, IAM role, файл).
+
+### Таймауты на стороне вызывающей системы
+
+Zulip outgoing webhook по умолчанию ждёт ответ 10 секунд
+(`OUTGOING_WEBHOOK_TIMEOUT_SECONDS = 10`). Для медленных моделей (Ollama,
+RAGFlow) этого может не хватить. Рекомендуется расширять таймаут.
+
+Для Zulip в Docker — добавить переменную в `environment`:
+
+```yaml
+environment:
+  SETTING_OUTGOING_WEBHOOK_TIMEOUT_SECONDS: "120"
+```
+
+Для других источников (Telegram, Slack, HTTP-вызовы) — настроить таймаут
+на стороне отправителя. Без таймаута внешняя система может:
+- Разорвать соединение по таймауту
+- Показать пользователю `Bot is unavailable`
+- Отправить повторный запрос (дубликат)
+
+### Логирование
+
+Все логи через `Effect.logInfo` / `Effect.logWarning` / `Effect.logError`:
+- Пишутся в `~/.local/share/opencode/log/opencode.log`
+- При `--print-logs` дублируются в stderr
+- Структурированный формат key=value, удобный для grep и агрегации (Loki, ELK, CloudWatch)
+- Длинные значения (промпт, ответ) обрезаются до 500-1000 символов
+- Полные промпты и ответы — через Langfuse / OpenTelemetry
+
+Примеры логов:
+```
+webhook.ingress source=zulip sender=Иван stream=general topic=t contentLen=42
+webhook.route matchField=stream pattern="*" command=bashkati4
+webhook.done source=zulip command=bashkati4 totalTime=3387 len=38 text=Привет...
+```
+
+### Git-ops: обновление конфигов без перезапуска
+
+1. Редактируете `.md` файлы в `.legion/command/` (через git)
+2. Пушите в репозиторий
+3. На сервере: `git pull` в директории проекта
+4. `curl -X POST http://server:3000/webhook/reload` — сброс кэша, новые команды активны
+
+Никакого SSH/SCP, никакого перезапуска сервера.
 
 ### Как добавить новый источник
 
@@ -469,6 +534,6 @@ RESPONSE total=3387ms chars=38
 
 ### Известные ограничения
 
-- `Command.Service` не используется, т.к. требует `InstanceRef` при инициализации. Команды читаются напрямую из `.legion/command/`.
+- `Command.Service` не используется. Команды читаются из `.legion/command/*.md`.
 - Провайдеры из `.legion/legion.jsonc` не загружаются в `Provider.Service` из-за отсутствия `InstanceRef` при старте. Провайдеры должны быть в глобальном `~/.config/opencode/opencode.json`.
-- `SessionPrompt.Service.prompt()` может висеть при использовании медленных моделей (Ollama). Рекомендуется таймаут.
+- `SessionPrompt.Service.prompt()` может висеть при использовании медленных моделей (Ollama). Рекомендуется таймаут на стороне вызывающей системы (см. ниже).

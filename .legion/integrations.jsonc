@@ -6,15 +6,23 @@
       "endpoint": "POST /webhook/zulip",
       "zulip_url": "https://localhost:8443",
       "commands_dir": ".legion/command",
+      "tokens": {
+        "bashkati4-bot@zulip.local": "8UXn81E6mEx5UESvOL8zBupHzlrVoRv1",
+        "adminbotv2-bot@zulip.local": "htDHrsc4k8YLjJqYkxUOr7QfbwPvLPLj"
+      },
       "bot_api_keys": {
         "bashkati4-bot@zulip.local": "8UXn81E6mEx5UESvOL8zBupHzlrVoRv1",
         "adminbotv2-bot@zulip.local": "htDHrsc4k8YLjJqYkxUOr7QfbwPvLPLj"
       },
+      "s3": {
+        "bucket": "my-legion-bots",
+        "prefix": "bot-files"
+      },
       "routing": [
-        { "stream": "admin",     "command": "admin" },
-        { "stream": "research",  "command": "bashkati4" },
-        { "stream": "general",   "command": "bashkati4" },
-        { "stream": "*",         "command": "bashkati4" }
+        { "stream": "deep-research", "command": "deep-research" },
+        { "stream": "admin",         "command": "admin" },
+        { "stream": "general",       "command": "bashkati4" },
+        { "stream": "*",             "command": "bashkati4" }
       ]
     }
   ],

@@ -11,9 +11,31 @@
           "tool_call": true
         }
       }
+    },
+    "openai": {
+      "name": "OpenAI",
+      "npm": "@ai-sdk/openai",
+      "api": "https://api.openai.com/v1",
+      "apiKey": "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",
+      "models": {
+        "gpt-4o": {
+          "id": "gpt-4o",
+          "tool_call": true
+        }
+      },
+      "options": {
+        "apiKey": "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"
+      }
+    },
+    "opencode": {
+      "models": {
+        "gpt-4o": {},
+        "gpt-4o-mini": {},
+        "qwen-3-coder-480b": {}
+      }
     }
   },
-  "model": "ollama/qwen2.5",
+  "model": "opencode/gpt-4o",
   "permission": {},
   "mcp": {
     "ragflow": {
@@ -26,7 +48,11 @@
     },
     "ragflow-proxy": {
       "type": "local",
-      "command": ["/home/neo/.bun/bin/bun", "run", "/home/neo/Projects/legion/legion/.legion/mcp-ragflow-proxy/index.ts"],
+      "command": [
+        "/home/neo/.bun/bin/bun",
+        "run",
+        "/home/neo/Projects/legion/legion/.legion/mcp-ragflow-proxy/index.ts"
+      ],
       "enabled": true,
       "environment": {
         "RAGFLOW_TOKEN": "ragflow-RiMTA5NmRlYWRkYjExZjBiYWVmNWVhOD",
@@ -37,8 +63,12 @@
       }
     }
   },
+  "ragflow": {
+    "api": "http://127.0.0.1:9380",
+    "token": "ragflow-RiMTA5NmRlYWRkYjExZjBiYWVmNWVhOD"
+  },
   "tools": {
     "github-triage": false,
-    "github-pr-search": false 
+    "github-pr-search": false
   }
 }
