@@ -1,0 +1,218 @@
+# Legion инфраструктура: Zulip + MinIO
+# Использование:
+#   1. cp .env.example .env
+#   2. docker compose up -d
+#   3. export $(grep -v '^#' .env | xargs) && bun run legion
+
+networks:
+  legion-net:
+    driver: bridge
+  ragflow-net:
+    name: docker_ragflow
+    external: true
+
+volumes:
+  zulip-postgres:
+  zulip-rabbitmq:
+  zulip-redis:
+  zulip-data:
+  minio-data:
+
+secrets:
+  zulip__postgres_password:
+    file: ./secrets/zulip__postgres_password
+  zulip__memcached_password:
+    file: ./secrets/zulip__memcached_password
+  zulip__rabbitmq_password:
+    file: ./secrets/zulip__rabbitmq_password
+  zulip__redis_password:
+    file: ./secrets/zulip__redis_password
+  zulip__secret_key:
+    file: ./secrets/zulip__secret_key
+  zulip__email_password:
+    file: ./secrets/zulip__email_password
+
+services:
+  # ── Zulip ──────────────────────────────────────────────────────
+  zulip-database:
+    image: "zulip/zulip-postgresql:14"
+    restart: unless-stopped
+    secrets:
+      - zulip__postgres_password
+    environment:
+      POSTGRES_DB: "zulip"
+      POSTGRES_USER: "zulip"
+      POSTGRES_PASSWORD_FILE: /run/secrets/zulip__postgres_password
+    volumes:
+      - "zulip-postgres:/var/lib/postgresql/data:rw"
+    networks:
+      - legion-net
+    attach: false
+
+  zulip-memcached:
+    image: "memcached:alpine"
+    restart: unless-stopped
+    command:
+      - "sh"
+      - "-euc"
+      - |
+        echo 'mech_list: plain' > "$$SASL_CONF_PATH"
+        echo "zulip@$$HOSTNAME:$$(cat $$MEMCACHED_PASSWORD_FILE)" > "$$MEMCACHED_SASL_PWDB"
+        echo "zulip@localhost:$$(cat $$MEMCACHED_PASSWORD_FILE)" >> "$$MEMCACHED_SASL_PWDB"
+        exec memcached -S
+    secrets:
+      - zulip__memcached_password
+    environment:
+      SASL_CONF_PATH: "/home/memcache/memcached.conf"
+      MEMCACHED_SASL_PWDB: "/home/memcache/memcached-sasl-db"
+      MEMCACHED_PASSWORD_FILE: /run/secrets/zulip__memcached_password
+    networks:
+      - legion-net
+    attach: false
+
+  zulip-rabbitmq:
+    image: "rabbitmq:4.2"
+    restart: unless-stopped
+    command:
+      - "sh"
+      - "-euc"
+      - |
+        export RABBITMQ_DEFAULT_PASS="$$(cat $$RABBITMQ_PASSWORD_FILE)"
+        echo 'default_user = $$(RABBITMQ_DEFAULT_USER)' >> /etc/rabbitmq/rabbitmq.conf
+        echo 'default_pass = $$(RABBITMQ_DEFAULT_PASS)' >> /etc/rabbitmq/rabbitmq.conf
+        exec docker-entrypoint.sh rabbitmq-server
+    secrets:
+      - zulip__rabbitmq_password
+    environment:
+      RABBITMQ_DEFAULT_USER: "zulip"
+      RABBITMQ_PASSWORD_FILE: /run/secrets/zulip__rabbitmq_password
+    volumes:
+      - "zulip-rabbitmq:/var/lib/rabbitmq:rw"
+    networks:
+      - legion-net
+    attach: false
+
+  zulip-redis:
+    image: "redis:alpine"
+    restart: unless-stopped
+    command:
+      - "sh"
+      - "-euc"
+      - '/usr/local/bin/docker-entrypoint.sh --requirepass "$$(cat $$REDIS_PASSWORD_FILE)"'
+    secrets:
+      - zulip__redis_password
+    environment:
+      REDIS_PASSWORD_FILE: /run/secrets/zulip__redis_password
+    volumes:
+      - "zulip-redis:/data:rw"
+    networks:
+      - legion-net
+    attach: false
+
+  zulip:
+    image: "ghcr.io/zulip/zulip-server:12.1-0"
+    restart: unless-stopped
+    ports:
+      - "${ZULIP_HTTP_PORT:-8080}:80"
+      - "${ZULIP_HTTPS_PORT:-8443}:443"
+    secrets:
+      - zulip__postgres_password
+      - zulip__memcached_password
+      - zulip__rabbitmq_password
+      - zulip__redis_password
+      - zulip__secret_key
+      - zulip__email_password
+    environment:
+      SETTING_EXTERNAL_HOST: "${ZULIP_EXTERNAL_HOST:-zulip.local:8443}"
+      SETTING_ZULIP_ADMINISTRATOR: "${ZULIP_ADMIN_EMAIL}"
+      SETTING_REMOTE_POSTGRES_HOST: "zulip-database"
+      SETTING_MEMCACHED_LOCATION: "zulip-memcached:11211"
+      SETTING_RABBITMQ_HOST: "zulip-rabbitmq"
+      SETTING_REDIS_HOST: "zulip-redis"
+      LOADBALANCER_IPS: "${LOADBALANCER_IPS:-172.18.0.0/16}"
+      SETTING_OUTGOING_WEBHOOK_TIMEOUT_SECONDS: "${ZULIP_WEBHOOK_TIMEOUT:-60}"
+      CERTIFICATES: "self-signed"
+    volumes:
+      - "zulip-data:/data:rw"
+    ulimits:
+      nofile:
+        soft: 1000000
+        hard: 1048576
+    depends_on:
+      - zulip-database
+      - zulip-memcached
+      - zulip-rabbitmq
+      - zulip-redis
+    networks:
+      - legion-net
+
+  # ── MinIO ──────────────────────────────────────────────────────
+  minio:
+    image: quay.io/minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-minioadmin}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - "minio-data:/data"
+    networks:
+      - legion-net
+
+  # ── MinIO bucket setup ────────────────────────────────────────
+  minio-setup:
+    image: quay.io/minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MC_HOST_local: "http://${MINIO_ROOT_USER:-minioadmin}:${MINIO_ROOT_PASSWORD:-minioadmin}@minio:9000"
+    entrypoint: >
+      /bin/sh -c "
+      mc mb local/${S3_BUCKET:-legion-bots} --ignore-existing &&
+      echo 'Bucket ${S3_BUCKET:-legion-bots} created' &&
+      mc anonymous set download local/${S3_BUCKET:-legion-bots} &&
+      echo 'Done'
+      "
+    networks:
+      - legion-net
+
+  # ── Legion (opencode server) ──────────────────────────────────
+  legion:
+    image: oven/bun:1.3
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file: .env
+    environment:
+      LEGION_PROJECT_DIR: /legion
+      LEGION_ZULIP_URL: "https://debug-zulip-1"
+      ZULIP_URL: "https://debug-zulip-1"
+      S3_ENDPOINT: "http://debug-minio-1:9000"
+      RAGFLOW_API: "http://docker-ragflow-cpu-1:9380"
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+      OPENCODE_SERVER_PASSWORD: "test"
+    volumes:
+      - /home/neo/Projects/legion_new/legion:/legion
+      - ~/.local/share/opencode:/root/.local/share/opencode
+      - ~/.config/opencode:/root/.config/opencode
+    working_dir: /legion/packages/opencode
+    command:
+      - sh
+      - -c
+      - |
+        bun run ./src/index.ts serve --port 3000 --hostname 0.0.0.0
+    depends_on:
+      - zulip
+      - minio
+    networks:
+      - legion-net
+      - ragflow-net

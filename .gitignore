@@ -35,3 +35,4 @@ logs/
 *.bun-build
 tsconfig.tsbuildinfo
 *.log
+secrets/*

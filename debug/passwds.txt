@@ -1,0 +1,5 @@
+Zulip admin:
+- URL: https://zulip.local:8443
+- Email: a.stepanov@2035.university
+- Пароль: legion-admin-2025
+- API key: bgLybnJfLsIr8WXyAnGuiPJVbVjViX04

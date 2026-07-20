@@ -2,7 +2,7 @@
 name: bashkati4
 description: "Запрос к агент-онтологу"
 agent: general
-model: ollama/qwen2.5
+model: opencode-go/deepseek-v4-flash
 ragflow_dataset: research-papers
 ---
 

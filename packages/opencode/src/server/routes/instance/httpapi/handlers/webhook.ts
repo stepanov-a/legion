@@ -17,7 +17,7 @@ import * as path from "path"
 import * as crypto from "crypto"
 import * as fs from "fs"
 import { parse as parseJsonc } from "jsonc-parser"
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
+import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3"
 
 const PROJECT_ROOT = process.env.LEGION_PROJECT_DIR ?? process.cwd()
 const LEGION_DIR = path.join(PROJECT_ROOT, ".legion")
@@ -52,8 +52,8 @@ function getCachedCommand(dir: string, name: string): string | undefined {
 // ── Session cache ───────────────────────────────────────────────
 const sessionCache = new Map<string, string>()
 
-function sessionCacheKey(source: string, stream: string, topic: string, sender: string): string {
-  if (stream === "dm") return `${source}:dm:${sender}`
+function sessionCacheKey(source: string, stream: string, topic: string, sender: string, botEmail?: string): string {
+  if (stream === "dm") return `${source}:dm:${sender}:${botEmail ?? "default"}`
   return `${source}:${stream}:${topic}`
 }
 
@@ -106,6 +106,105 @@ function getS3(region?: string, endpoint?: string) {
   return s3Client
 }
 
+// ── Per-bot S3 config helpers ───────────────────────────────────
+const BOTS_S3_BUCKET = process.env.S3_BUCKET ?? ""
+
+function botS3ConfigKey(commandName: string): string {
+  return `bot-prompts/${commandName}/config.json`
+}
+
+const s3ForConfig = process.env.S3_ENDPOINT && process.env.S3_ACCESS_KEY && process.env.S3_SECRET_KEY && process.env.S3_BUCKET
+  ? new S3Client({
+      region: process.env.S3_REGION ?? "us-east-1",
+      endpoint: process.env.S3_ENDPOINT,
+      credentials: { accessKeyId: process.env.S3_ACCESS_KEY!, secretAccessKey: process.env.S3_SECRET_KEY! },
+      forcePathStyle: true,
+    })
+  : null
+
+// ── Zulip reply helpers ────────────────────────────────────────
+async function sendZulipReply(botEmail: string, botApiKey: string, toEmail: string, content: string): Promise<void> {
+  try {
+    const zulipUrl = "https://zulip"
+    const zulipHost = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
+    const auth = "Basic " + Buffer.from(`${botEmail}:${botApiKey}`).toString("base64")
+    const headers: Record<string, string> = {
+      Authorization: auth,
+      "Content-Type": "application/x-www-form-urlencoded",
+    }
+    headers["Host"] = zulipHost
+    const res = await fetch(`${zulipUrl}/api/v1/messages`, {
+      method: "POST",
+      headers,
+      body: new URLSearchParams({ type: "private", to: toEmail, content }).toString(),
+    })
+    const json = await res.json()
+    if (json.result !== "success") {
+      console.error("sendZulipReply error:", json.msg, "for email", botEmail, "to", toEmail)
+    }
+  } catch (e: any) {
+    console.error("sendZulipReply exception:", e.message)
+  }
+}
+
+async function getBotApiKey(commandName: string): Promise<string | null> {
+  if (!s3ForConfig || !commandName) return null
+  try {
+    const key = botS3ConfigKey(commandName)
+    const res = await s3ForConfig.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: key }))
+    const cfg = JSON.parse(await res.Body!.transformToString("utf-8"))
+    return cfg.zulip_api_key ?? null
+  } catch { return null }
+}
+
+async function learnBotToken(commandName: string, token: string): Promise<void> {
+  if (!s3ForConfig || !commandName || !token) return
+  try {
+    const key = botS3ConfigKey(commandName)
+    const res = await s3ForConfig.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: key }))
+    const text = await res.Body!.transformToString("utf-8")
+    const config = JSON.parse(text)
+    if (!config.service_tokens) config.service_tokens = []
+    if (!config.service_tokens.includes(token)) {
+      config.service_tokens.push(token)
+      await s3ForConfig.send(new PutObjectCommand({
+        Bucket: BOTS_S3_BUCKET,
+        Key: key,
+        Body: JSON.stringify(config, null, 2),
+        ContentType: "application/json",
+      }))
+    }
+  } catch {}
+}
+
+// ── S3 prompt sync ──────────────────────────────────────────────
+const S3_COMMANDS_DIR = process.env.LEGION_PROJECT_DIR
+  ? path.join(process.env.LEGION_PROJECT_DIR, ".legion", "command")
+  : ""
+
+async function syncPromptsFromS3(): Promise<number> {
+  if (!s3ForConfig || !S3_COMMANDS_DIR) return 0
+  let count = 0
+  try {
+    const { ListObjectsV2Command } = await import("@aws-sdk/client-s3")
+    const res = await s3ForConfig.send(new ListObjectsV2Command({
+      Bucket: BOTS_S3_BUCKET,
+      Prefix: "bot-prompts/",
+    }))
+    for (const item of res.Contents ?? []) {
+      if (!item.Key?.endsWith("/prompt.md")) continue
+      const name = item.Key.replace("bot-prompts/", "").replace("/prompt.md", "")
+      const promptRes = await s3ForConfig.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: item.Key }))
+      const text = await promptRes.Body!.transformToString("utf-8")
+      const localPath = path.join(S3_COMMANDS_DIR, `${name}.md`)
+      fs.mkdirSync(path.dirname(localPath), { recursive: true })
+      fs.writeFileSync(localPath, text, "utf-8")
+      count++
+    }
+  } catch {}
+  return count
+}
+
 // ── Handler ─────────────────────────────────────────────────────
 export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks", (handlers) =>
   Effect.gen(function* () {
@@ -133,38 +232,11 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       const source = config?.sources?.find((s: any) => s.name === sourceName)
       if (!source) return { content: `❌ Source "${sourceName}" not configured.` }
 
-      const tokens: Record<string, string> = source.tokens ?? {}
       const botEmail = payload.bot_email ?? ""
-      const expectedToken = tokens[botEmail]
-      if (expectedToken && expectedToken !== payload.token) {
-        Effect.logWarning("webhook.token_mismatch", { botEmail })
-        return { content: "❌ Invalid token." }
-      }
-
       const zulipUrl = process.env.LEGION_ZULIP_URL ?? source.zulip_url
-      const botApiKeys: Record<string, string> = source.bot_api_keys ?? {}
       const commandsDir = path.resolve(PROJECT_ROOT, source.commands_dir ?? ".legion/command")
 
-      // ── 2. Файлы ──────────────────────────────────────────────────
-      const fileParts: Array<{ url: string; mime: string; filename: string; bytes?: Buffer; zulipPath?: string; botKey?: string }> = []
-      if (zulipUrl) {
-        for (const uploadPath of [...new Set([...content.matchAll(UPLOAD_PATH_RE)].map(m => m[0].replace(/[?\s].*$/, "")))]) {
-          const f = yield* Effect.tryPromise(async () => {
-            const clean = uploadPath.replace(/[)\]>'".,;:!]+$/, "")
-            const apiKey = botApiKeys[payload.bot_email ?? ""]
-            if (!apiKey) { Effect.logWarning("webhook.download_skip", { path: clean, bot: payload.bot_email }); return null }
-            const res = await fetch(`${zulipUrl}${clean}?api_key=${apiKey}`, { headers: { "User-Agent": "LegionBot/1.0" }, redirect: "follow" })
-            if (!res.ok) { Effect.logWarning("webhook.download_fail", { path: clean, status: res.status }); return null }
-            const mime = res.headers.get("content-type") ?? "application/octet-stream"
-            const bytes = Buffer.from(await res.arrayBuffer())
-            Effect.logInfo("webhook.download_ok", { filename: path.basename(clean), mime, size: bytes.length })
-            return { url: `data:${mime};base64,${bytes.toString("base64")}`, mime, filename: path.basename(clean), bytes, zulipPath: clean, botKey: apiKey }
-          }).pipe(Effect.catch(() => Effect.succeed(null)))
-          if (f) fileParts.push(f)
-        }
-      }
-
-      // ── 3. Routing ────────────────────────────────────────────────
+      // ── 2. Routing ────────────────────────────────────────────────
       let commandName = config.default_command ?? "default"
       for (const rule of source.routing ?? []) {
         const matchField = rule.field ?? "stream"
@@ -181,7 +253,45 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         }
       }
 
-      // ── 4. Команда (должна быть до S3/RAGFlow — отдаёт ragflow_dataset) ─
+      // ── 3. Token validation (via S3 per-bot config) ────────────────
+      const receivedToken = payload.token ?? ""
+      if (botEmail && receivedToken && commandName !== "default") {
+        const botCfgKey = botS3ConfigKey(commandName)
+        const botCfg = yield* Effect.tryPromise(async () => {
+          const res = await s3ForConfig!.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: botCfgKey }))
+          return JSON.parse(await res.Body!.transformToString("utf-8"))
+        }).pipe(Effect.catch(() => Effect.succeed(undefined as any)))
+        if (botCfg?.service_tokens?.length > 0 && !botCfg.service_tokens.includes(receivedToken)) {
+          Effect.logWarning("webhook.token_mismatch", { botEmail, commandName })
+          return { content: "❌ Invalid token." }
+        }
+      }
+
+      // ── 4. Файлы (download from Zulip, using per-bot API keys from S3) ─
+      const fileParts: Array<{ url: string; mime: string; filename: string; bytes?: Buffer; zulipPath?: string; botKey?: string }> = []
+      if (zulipUrl && commandName !== "default") {
+        const botCfgKey = botS3ConfigKey(commandName)
+        const botApiKey = yield* Effect.tryPromise(async () => {
+          const res = await s3ForConfig!.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: botCfgKey }))
+          const cfg = JSON.parse(await res.Body!.transformToString("utf-8"))
+          return cfg.zulip_api_key ?? ""
+        }).pipe(Effect.catch(() => Effect.succeed("")))
+        for (const uploadPath of [...new Set([...content.matchAll(UPLOAD_PATH_RE)].map(m => m[0].replace(/[?\s].*$/, "")))]) {
+          const f = yield* Effect.tryPromise(async () => {
+            const clean = uploadPath.replace(/[)\]>'".,;:!]+$/, "")
+            if (!botApiKey) { Effect.logWarning("webhook.download_skip", { path: clean }); return null }
+            const res = await fetch(`${zulipUrl}${clean}?api_key=${botApiKey}`, { headers: { "Host": "zulip.local:8443", "User-Agent": "LegionBot/1.0" }, redirect: "follow" })
+            if (!res.ok) { Effect.logWarning("webhook.download_fail", { path: clean, status: res.status }); return null }
+            const mime = res.headers.get("content-type") ?? "application/octet-stream"
+            const bytes = Buffer.from(await res.arrayBuffer())
+            Effect.logInfo("webhook.download_ok", { filename: path.basename(clean), mime, size: bytes.length })
+            return { url: `data:${mime};base64,${bytes.toString("base64")}`, mime, filename: path.basename(clean), bytes, zulipPath: clean, botKey: botApiKey }
+          }).pipe(Effect.catch(() => Effect.succeed(null)))
+          if (f) fileParts.push(f)
+        }
+      }
+
+      // ── 5. Команда ─
       const cmdFile = yield* Effect.sync(() => getCachedCommand(commandsDir, commandName)).pipe(Effect.catch(() => Effect.succeed(undefined)))
       if (!cmdFile) return { content: `❌ Command "${commandName}" not found.` }
       const { agent, model: modelStr, mcp, allow, ragflow_dataset, body } = parseFrontmatter(cmdFile)
@@ -239,20 +349,6 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         }
       }
 
-      if (allow.length > 0) {
-        const matched = allow.some(pattern => {
-          if (pattern === senderEmail) return true
-          if (pattern.endsWith("*") && senderEmail.startsWith(pattern.slice(0, -1))) return true
-          if (pattern.startsWith("*") && senderEmail.endsWith(pattern.slice(1))) return true
-          return false
-        })
-        if (!matched) {
-          Effect.logWarning("webhook.deny", { senderEmail, allow: JSON.stringify(allow) })
-          return { content: "❌ Access denied." }
-        }
-        Effect.logInfo("webhook.allow", { senderEmail })
-      }
-
       // ── 7. Рендер ──────────────────────────────────────────────────
       const fields: Record<string, string> = { $SENDER: sender, $STREAM: stream, $TOPIC: topic, $SOURCE: sourceName }
       let prompt = body
@@ -277,8 +373,9 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         else { return { content: `❌ Модель "${modelStr}" не найдена. Укажи существующую модель в frontmatter команды.` } }
       }
 
-      // ── 9. LLM ───────────────────────────────────────────────────
-      const cacheKey = sessionCacheKey(sourceName, stream, topic, sender)
+      // ── 9. Immediate acknowledgement + background LLM ──────────────
+      const whBotEmail = botEmail ?? payload.bot_email ?? ""
+      const cacheKey = sessionCacheKey(sourceName, stream, topic, sender, whBotEmail)
       const sessionIDStr = getOrCreateSessionID(cacheKey)
       const sessionID = SessionV2.ID.descending(sessionIDStr)
       yield* sessions.create({
@@ -292,14 +389,40 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       if (modelInput) input.model = modelInput
       if (Object.keys(mcp).length > 0) input.tools = mcp
 
-      Effect.logInfo("webhook.prompt_start", { source: sourceName, command: commandName, agent, model: modelStr ?? "default", sessionID, promptLen: prompt.length, files: fileParts.length })
-      const result = yield* sessionPrompt.prompt(input).pipe(Effect.catch(() => Effect.succeed(undefined as any)))
-      if (!result) return { content: "❌ Processing error." }
+      // Learn bot service token from first webhook (per-bot S3 config)
+      const whToken = payload.token ?? ""
 
-      const responseText = (result.parts as any[]).filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n").trim()
+      Effect.logInfo("webhook.prompt_start", { source: sourceName, command: commandName, agent, model: modelStr ?? "default", sessionID, promptLen: prompt.length, files: fileParts.length })
+
+      // Send ack only if bot has MCP tools (complex request may take time)
+      const hasTools = Object.keys(mcp).length > 0
+      if (hasTools && whBotEmail && commandName !== "default") {
+        const botApiKey = yield* Effect.tryPromise(() => getBotApiKey(commandName)).pipe(Effect.catch(() => Effect.succeed(null)))
+        if (botApiKey) {
+          sendZulipReply(whBotEmail, botApiKey, senderEmail, "✅ Принял запрос. Может потребоваться некоторое время — ожидайте ответ...")
+        }
+      }
+
+      // LLM processing — response sent via Zulip API when done
+      const result = yield* sessionPrompt.prompt(input).pipe(Effect.catch(() => Effect.succeed(undefined as any)))
+      if (result) {
+        const responseText = (result.parts as any[]).filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n").trim()
+        if (responseText && commandName !== "default") {
+          const botApiKey = yield* Effect.tryPromise(() => getBotApiKey(commandName)).pipe(Effect.catch(() => Effect.succeed(null)))
+          if (botApiKey) {
+            sendZulipReply(whBotEmail, botApiKey, senderEmail, responseText)
+          }
+        }
+      }
+
+      // Save service token (fire-and-forget)
+      if (whToken && commandName !== "default") {
+        learnBotToken(commandName, whToken)
+      }
+
       const elapsed = Date.now() - startTime
-      Effect.logInfo("webhook.done", { source: sourceName, command: commandName, model: modelStr ?? "default", totalTime: elapsed, len: responseText.length, text: truncate(responseText, 500) })
-      return { content: responseText || "✅ Done." }
+      Effect.logInfo("webhook.done", { source: sourceName, command: commandName, model: modelStr ?? "default", totalTime: elapsed, text: "acknowledged" })
+      return { content: "✅" }
     })
 
     const ingress = (ctx: { params: { source: string }; payload: unknown }) =>
@@ -308,8 +431,9 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
     const reload = Effect.fn("Webhook.reload")(function* () {
       cachedConfig = null
       cachedCommands.clear()
-      Effect.logInfo("webhook.cache_reloaded", {})
-      return { content: "✅ Cache reloaded." }
+      const count = yield* Effect.tryPromise(() => syncPromptsFromS3()).pipe(Effect.catch(() => Effect.succeed(0)))
+      Effect.logInfo("webhook.cache_reloaded", { promptsFromS3: count })
+      return { content: `✅ Cache reloaded. ${count > 0 ? `Restored ${count} prompts from S3.` : ""}`.trim() }
     })
 
     return handlers.handle("ingress", ingress).handle("reload", reload)

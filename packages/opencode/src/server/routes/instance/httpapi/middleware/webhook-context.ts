@@ -12,7 +12,8 @@ import { Effect, Layer } from "effect"
 import { HttpServerResponse } from "effect/unstable/http"
 import { HttpApiMiddleware } from "effect/unstable/httpapi"
 
-const PROJECT_DIR = process.env.LEGION_PROJECT_DIR ?? process.cwd()
+const PROJECT_DIR = process.env.LEGION_PROJECT_DIR
+if (!PROJECT_DIR) throw new Error("LEGION_PROJECT_DIR is required")
 
 // Класс-маркер middleware. Effect использует его для идентификации.
 export class WebhookContextMiddleware extends HttpApiMiddleware.Service<

@@ -1,247 +1,358 @@
-# Integrations config — `.legion/integrations.jsonc`
+# Руководство администратора: Интеграция Zulip ↔ Legion
 
-Конфиг управляет вебхуками: какие источники (Zulip, Telegram, Slack, …)
-принимать, как маршрутизировать по каналам, какие команды запускать.
+## Архитектура
 
-## Структура
+```
+Пользователь → Zulip (DM боту)
+  │ Outgoing webhook (POST /webhook/zulip)
+  ▼
+Legion Webhook Handler
+  │
+  │ 1. Routing (integrations.jsonc) → command name
+  │ 2. Token validation (S3 per-bot config → service_tokens[])
+  │ 3. Session (ключ: source:dm:sender:botEmail)
+  │ 4. Если у бота есть MCP-инструменты → immediate ack в Zulip
+  │ 5. LLM + MCP инструменты
+  │ 6. Ответ → sendZulipReply() в Zulip API
+  ▼
+Ответ в Zulip от имени бота
+```
+
+**Ключевые решения:**
+
+- **Static IP для Legion** (`172.18.0.10`) — payload URL ботов не меняется после рестарта
+- **S3 — primary storage** для промптов и конфигов; локальные файлы — кэш
+- **Service tokens** в S3 per-bot конфиге, не в integrations.jsonc
+- **Acknowledgement** отправляется только если у бота есть MCP-инструменты
+- **Session** изолирована по `botEmail + sender`, контекст не смешивается между ботами
+- **Zulip worker timeout** увеличен до 120 секунд (patch outgoing_webhooks.py)
+
+---
+
+## 1. Быстрый старт (clean deploy)
+
+```bash
+cd /home/neo/Projects/legion_new/legion
+bash debug/generate_secrets.sh
+docker compose up -d
+# ждём 1-3 мин пока Zulip инициализируется
+```
+
+---
+
+## 2. Создание организации Zulip
+
+```bash
+# Создать realm
+docker exec legion-zulip-1 su zulip -c '
+/home/zulip/deployments/current/manage.py create_realm \
+  "Legion" a.stepanov@2035.university "Admin" --string-id=legion
+'
+
+# Назначить пароль и права админа
+docker exec legion-zulip-1 su zulip -c '
+/home/zulip/deployments/current/manage.py shell -c "
+from zerver.models import UserProfile
+from django.contrib.auth.hashers import make_password
+u = UserProfile.objects.get(id=8)
+u.email = \"a.stepanov@2035.university\"
+u.delivery_email = \"a.stepanov@2035.university\"
+u.full_name = \"Admin\"
+u.password = make_password(\"legion-admin-2025\")
+u.is_active = True
+u.is_realm_admin = True
+u.save()
+"'
+
+# Получить API ключ админа
+curl -sk "https://localhost:8443/api/v1/fetch_api_key" \
+  -H "Host: legion.zulip.local:8443" \
+  -d "username=a.stepanov@2035.university" \
+  -d "password=legion-admin-2025"
+# → запомнить api_key
+```
+
+---
+
+## 3. Настройка .env
+
+В `debug/.env` прописать (Docker DNS — для работы внутри контейнера):
+
+```ini
+# ── Zulip API (внутренний Docker DNS)
+ZULIP_URL=https://zulip
+ZULIP_EMAIL=a.stepanov@2035.university
+ZULIP_API_KEY=<api_key_из_шага_2>
+ZULIP_API_HOST=legion.zulip.local:8443
+
+# ── Для скачивания файлов из Zulip (внешний URL)
+LEGION_ZULIP_URL=https://zulip.local:8443
+
+# ── Webhook URL для новых ботов (legion.local — статический IP)
+LEGION_PAYLOAD_URL=http://legion.local:3000/webhook/zulip
+
+# ── S3 (MinIO)
+S3_ENDPOINT=http://minio:9000
+S3_REGION=us-east-1
+S3_ACCESS_KEY=minioadmin
+S3_SECRET_KEY=minioadmin
+S3_BUCKET=legion-bots
+
+# ── Логи
+OPENCODE_PRINT_LOGS=1
+NODE_TLS_REJECT_UNAUTHORIZED=0
+```
+
+Перезапустить Legion: `docker compose restart legion`
+
+---
+
+## 4. Статический IP для Legion
+
+В `docker-compose.yml` у сервиса `legion` указан статический IP:
+
+```yaml
+legion:
+  networks:
+    legion-net:
+      ipv4_address: 172.18.0.10
+```
+
+Zulip имеет `extra_hosts`, указывающий на этот же IP:
+
+```yaml
+zulip:
+  extra_hosts:
+    - "legion.local:172.18.0.10"
+```
+
+Благодаря этому:
+- `legion.local` резолвится внутри Zulip в актуальный IP
+- Payload URL `http://legion.local:3000/webhook/zulip` не меняется
+- Zulip URL-валидатор принимает `legion.local` (есть TLD)
+
+---
+
+## 5. Регистрация бота-админа
+
+```bash
+API_KEY="<api_key_из_шага_2>"
+
+# Создать каналы
+for stream in general admin bot-consulting; do
+  curl -sk "https://localhost:8443/api/v1/users/me/subscriptions" \
+    -H "Host: legion.zulip.local:8443" \
+    -u "a.stepanov@2035.university:$API_KEY" \
+    -d "subscriptions=[{\"name\":\"$stream\"}]"
+done
+
+# Создать outgoing webhook бота
+RESP=$(curl -sk -X POST "https://localhost:8443/api/v1/bots" \
+  -H "Host: legion.zulip.local:8443" \
+  -u "a.stepanov@2035.university:$API_KEY" \
+  -d "full_name=Admin Bot" \
+  -d "short_name=adminbotv2" \
+  -d "bot_type=3" \
+  -d 'payload_url="http://legion.local:3000/webhook/zulip"')
+
+echo "$RESP" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['user_id'], d['api_key'])"
+
+# Получить service token (понадобится для S3 конфига)
+docker exec legion-zulip-1 su zulip -c "
+/home/zulip/deployments/current/manage.py shell -c '
+from zerver.models.bots import Service
+s = Service.objects.get(user_profile_id=<user_id>)
+print(s.token)
+'"
+```
+
+---
+
+## 6. Прописать бота в конфиги
+
+### integrations.jsonc — только routing
 
 ```jsonc
 {
-  "sources": [
-    {
-      "name": "zulip",          // уникальное имя источника
-      "type": "webhook",        // всегда "webhook"
-      "endpoint": "POST /webhook/zulip",  // для справки, не влияет на регистрацию
-
-      // Параметры для скачивания файлов (опционально)
-      "zulip_url": "https://zulip.example.com",
-      "bot_api_keys": {
-        "bot@zulip.example.com": "api_key_here"
-      },
-
-      // Директория с .md командами (относительно корня проекта)
-      "commands_dir": ".legion/command",
-
-      // Правила маршрутизации: первое совпадение побеждает
-      "routing": [
-        { "stream": "research",  "command": "research" },
-        { "stream": "general",   "command": "zulip" },
-        { "field": "chat_id",    "pattern": "-100*", "command": "analytics" },
-        { "stream": "*",         "command": "zulip" }
-      ]
-    }
-  ],
-
-  // Команда по умолчанию, если ни одно правило не совпало
-  "default_command": "zulip"
+  "sources": [{
+    "name": "zulip",
+    "type": "webhook",
+    "endpoint": "POST /webhook/zulip",
+    "zulip_url": "https://legion.zulip.local:8443",
+    "commands_dir": ".legion/command",
+    "tokens": {},
+    "bot_api_keys": {},
+    "routing": [
+      { "field": "stream", "stream": "admin",        "command": "admin" },
+      { "field": "bot_email", "bot_email": "adminbotv2-bot@zulip.local", "command": "admin" },
+      { "field": "stream", "stream": "*",            "command": "bashkati4" }
+    ]
+  }]
 }
 ```
 
-## Поля source
+`tokens` и `bot_api_keys` — пустые. Валидация токенов и API-ключи — в S3 per-bot конфигах.
 
-| Поле | Обязательное | Описание |
-|------|-------------|----------|
-| `name` | да | Уникальное ID источника. Подставляется в `POST /webhook/{name}` |
-| `type` | да | Всегда `"webhook"` |
-| `endpoint` | нет | Для справки, в конфиге не используется |
-| `zulip_url` | нет | Базовый URL Zulip-сервера для скачивания файлов |
-| `tokens` | нет | `{ email: token }` для верификации запросов (сравнивается с `payload.token`) |
-| `bot_api_keys` | нет | `{ email: api_key }` для авторизации при скачивании файлов |
-| `s3` | нет | `{ bucket, prefix, region, endpoint }` — S3 для фоновой загрузки файлов (см. ниже) |
-
-| `commands_dir` | нет | Путь к .md командам, по умолчанию `.legion/command` |
-| `routing` | нет | Правила маршрутизации (см. ниже) |
-
-## Routing
-
-Правила применяются по порядку — **первое совпадение побеждает**.
-
-```jsonc
-{ "stream": "research",  "command": "research" }
-```
-
-| Поле | Описание |
-|------|----------|
-| `field` | Поле сообщения для сравнения: `"stream"`, `"chat_id"`. По умолчанию `"stream"` |
-| `stream` / `chat_id` | Значение для сравнения (поле с тем же именем, что и `field`). `"*"` — любое |
-| `command` | Имя .md файла команды (без расширения) |
-
-### Примеры
-
-```jsonc
-"routing": [
-  // Точное совпадение канала
-  { "stream": "research",    "command": "research" },
-  { "stream": "general",     "command": "zulip" },
-
-  // Wildcard (любой канал)
-  { "stream": "*",           "command": "zulip" },
-
-  // По чат-ID (для Telegram)
-  { "field": "chat_id", "chat_id": "-100*", "command": "analytics" },
-]
-```
-
-## S3 (файловое хранилище)
-
-При наличии блока `s3` в конфиге источника, каждый загруженный файл
-автоматически сохраняется в S3 **в фоновом режиме** — HTTP-ответ
-возвращается сразу, не дожидаясь S3.
-
-```jsonc
-"s3": {
-  "bucket": "my-legion-bots",               // обязательное
-  "prefix": "bot-files",                    // опционально, по умолчанию "files"
-  "region": "eu-central-1",                 // опционально, по умолчанию us-east-1
-  "endpoint": "https://s3.region.amazonaws.com"  // опционально
-}
-```
-
-Путь в S3: `{prefix}/{command}/{source}/{message_id}/{filename}`
-Пример: `bot-files/bashkati4/zulip/123/report.pdf`
-
-Credentials берутся из AWS SDK chain:
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` env vars
-- IAM role (в EC2 / EKS)
-- `~/.aws/credentials`
-
-## RAGFlow
-
-При указании `ragflow_dataset` в frontmatter команды, каждый загруженный
-текстовый файл автоматически загружается в RAGFlow dataset через `forkDetach`
-(фоновый поток, независимый от HTTP-запроса):
+### admin.md
 
 ```yaml
 ---
-name: research
-ragflow_dataset: research-papers
----
-```
-
-API и токен RAGFlow берутся из `.legion/legion.jsonc`:
-
-```jsonc
-"ragflow": {
-  "api": "http://127.0.0.1:9380",
-  "token": "ragflow-RiMTA5NmRlYWRkYjExZjBiYWVmNWVhOD"
-}
-```
-
-## Команды — `.legion/command/{name}.md`
-
-```markdown
----
-name: zulip
-description: "Zulip bot"
+name: admin
+description: "Админские команды (создание ботов)"
 agent: general
-model: ollama/qwen2.5:3b       # опционально
+model: opencode-go/deepseek-v4-flash
+mcp: { bot-factory: true }
+allow: ["a.stepanov@2035.university"]
+---
+Ты — админ-бот Legion. ...
+```
+
+### bots.jsonc — реестр ботов
+
+```jsonc
+{
+  "bots": [{
+    "name": "admin",
+    "description": "Админские команды",
+    "agent": "general",
+    "stream": "admin",
+    "model": "opencode-go/deepseek-v4-flash",
+    "mcp": { "bot-factory": true },
+    "allow": ["a.stepanov@2035.university"],
+    "zulip_email": "adminbotv2-bot@zulip.local",
+    "zulip_api_key": "<api_key>",
+    "zulip_user_id": <user_id>
+  }]
+}
+```
+
 ---
 
-Ты — Zulip бот. Пользователь $SENDER в канале $STREAM (тема: $TOPIC):
+## 7. Sync в S3 и перезагрузка
 
-$CONTENT
+```bash
+# Синхронизировать промпты и конфиги в S3
+docker exec legion-legion-1 bash -c '
+cat > /tmp/sync_all.ts << "EOF"
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3"
+import * as fs from "fs"
 
-Ответь на русском.
+const s3 = new S3Client({ region: "us-east-1", endpoint: "http://minio:9000",
+  credentials: { accessKeyId: "minioadmin", secretAccessKey: "minioadmin" }, forcePathStyle: true })
+const bots = JSON.parse(fs.readFileSync("/legion/.legion/bots.jsonc", "utf-8"))
+for (const bot of bots.bots) {
+  await s3.send(new PutObjectCommand({
+    Bucket: "legion-bots", Key: `bot-prompts/${bot.name}/config.json`,
+    Body: JSON.stringify(bot, null, 2), ContentType: "application/json" }))
+  const md = fs.readFileSync(`/legion/.legion/command/${bot.name}.md`, "utf-8")
+  await s3.send(new PutObjectCommand({
+    Bucket: "legion-bots", Key: `bot-prompts/${bot.name}/prompt.md`,
+    Body: md, ContentType: "text/markdown" }))
+}
+EOF
+bun run /tmp/sync_all.ts
+'
+
+# Перезагрузить (подтянет промпты из S3)
+curl -X POST http://localhost:3000/webhook/reload
 ```
 
-### Переменные шаблона
-
-| Переменная | Откуда берётся |
-|------------|---------------|
-| `$SENDER` | `message.sender_full_name` / `sender_username` |
-| `$STREAM` | `message.display_recipient` / `chat` |
-| `$TOPIC` | `message.topic` |
-| `$CONTENT` | `message.content` / `text` |
-| `$SOURCE` | Имя источника (`name` из конфига) |
-
-### Frontmatter
-
-| Поле | Назначение |
-|------|-----------|
-| `name` | Имя команды (должно совпадать с именем файла) |
-| `description` | Описание (не используется) |
-| `agent` | Агент opencode (по умолчанию `general`) |
-| `model` | Модель в формате `providerId/modelId`, опционально |
-| `mcp` | Какие MCP-серверы включены, `{ ragflow-proxy: true, github: false }` |
-| `allow` | Whitelist email'ов отправителей, `["user@mail.com", "*@company.com"]` |
-| `ragflow_dataset` | ID датасета в RAGFlow для фоновой загрузки файлов |
-
-Пример:
-```yaml
 ---
-name: research
-agent: general
-model: ollama/qwen2.5:3b
-mcp: { ragflow-proxy: true }
-allow: ["ivan@company.com", "*@team.org"]
+
+## 8. Проверка
+
+Написать боту в DM в Zulip. Если у бота есть MCP-инструменты — сразу придёт acknowledgement, затем ответ LLM.
+
 ---
+
+## 9. Создание новых ботов
+
+Через админ-бота в Zulip или напрямую через bot-factory MCP:
+
+> `создай бота <имя> для канала <stream>`
+
+`create_bot` создаёт:
+1. `.md` промпт (локально + S3: `bot-prompts/{name}/prompt.md`)
+2. Zulip-бота (outgoing webhook, `bot_type=3`)
+3. Routing в `integrations.jsonc`
+4. Конфиг в S3: `bot-prompts/{name}/config.json`
+5. Service token auto-learn при первом вебхуке
+
+**Обновление/удаление:** `update_bot`, `delete_bot`, `get_bot` — все через bot-factory MCP.
+
+**Self-update:** при создании с `self_update: true` — бот получает `bot-factory` MCP и может обновлять свой промпт через `update_bot`.
+
+---
+
+## 10. Детали реализации
+
+### Webhook handler flow (webhook.ts)
+
+1. **Routing** — поиск команды по `field + pattern` из `integrations.jsonc`
+2. **Token validation** — проверка `payload.token` против `service_tokens[]` из S3 конфига бота. Если `service_tokens` пуст — пропускаем (auto-learn).
+3. **Session** — ключ `${source}:${stream|dm}:${sender}:${botEmail}`. Каждый бот + пользователь = своя сессия.
+4. **Acknowledgement** — если у бота есть MCP-инструменты (`mcp: { ... }`), сразу отправляется "✅ Принял запрос..." через Zulip API.
+5. **LLM** — `sessionPrompt.prompt()` с MCP инструментами.
+6. **Response** — ответ LLM отправляется через Zulip API (`sendZulipReply`) после завершения.
+7. **Learn token** — `payload.token` сохраняется в S3 конфиг бота (`service_tokens[]`) для будущей валидации.
+8. **Webhook return** — короткое `"✅"`, не дублирует ack.
+
+### learnBotToken
+
+При первом вебхуке от нового бота `service_tokens` пуст → валидация пропускается. После успешной обработки `payload.token` записывается в `bot-prompts/{name}/config.json → service_tokens[]`. Со второго запроса токен проверяется.
+
+### sendZulipReply
+
+Функция отправки сообщений в Zulip от имени бота. Используется для ack и для доставки ответа LLM. Использует `zulip_api_key` из S3 конфига бота + `Host: legion.zulip.local:8443`.
+
+### Zulip worker timeout
+
+По умолчанию `MAX_CONSUME_SECONDS = 30` — Zulip убивает обработку, если она длится дольше. Для поддержки долгих LLM-запросов патчим:
+
+```bash
+docker exec legion-zulip-1 sed -i \
+  "/^class OutgoingWebhookWorker/a \ \ \ \ MAX_CONSUME_SECONDS = 120" \
+  /home/zulip/deployments/current/zerver/worker/outgoing_webhooks.py
+docker exec legion-zulip-1 supervisorctl restart \
+  "zulip-workers:zulip_events_outgoing_webhooks"
 ```
 
-## Добавление нового источника
+---
 
-1. Добавить блок в `sources[]`:
-   ```jsonc
-   {
-     "name": "telegram",
-     "type": "webhook",
-     "commands_dir": ".legion/command",
-     "routing": [
-       { "chat_id": "-100*", "command": "summarize" },
-       { "chat_id": "*",     "command": "general" }
-     ]
-   }
-   ```
-2. Создать `.md` команды в `commands_dir`
-3. Настроить внешнюю систему (Telegram, Slack) на `POST /webhook/telegram`
-4. Никаких изменений TypeScript не требуется
+## 11. Файловая структура
 
-## Скачивание файлов
-
-Файлы автоматически скачиваются для источников, у которых указан `zulip_url`.
-В тексте сообщения ищутся `/user_uploads/...` ссылки через regex.
-Авторизация — `?api_key=<ключ бота>` из `bot_api_keys`.
-Текстовые файлы (по mime или расширению) декадятся в base64 и добавляются в промпт.
-Бинарные — только имя и тип.
-
-### Git-ops: обновление конфигов без перезапуска
-
-1. Редактируете `.md` файлы в `.legion/command/` (через git)
-2. Пушите в репозиторий
-3. На сервере: `git pull` в директории проекта
-4. `curl -X POST http://server:3000/webhook/reload` — сброс кэша, новые команды активны
-
-Никакого SSH/SCP, никакого перезапуска сервера.
-
-## Логирование
-
-Все логи через `Effect.logInfo` / `Effect.logWarning` / `Effect.logError`:
-- Пишутся в `~/.local/share/opencode/log/opencode.log`
-- При `--print-logs` дублируются в stderr
-- Структурированный формат key=value
-- Длинные значения (промпт, ответ) обрезаются до 500-1000 символов
-
-Пример:
 ```
-webhook.ingress source=zulip sender=Иван stream=general topic=hello contentLen=42
-webhook.route matchField=stream pattern=* command=bashkati4
-webhook.prompt text="Ты — агент-онтолог..."
-webhook.model_resolved model=ollama/qwen2.5
-webhook.session cacheKey=zulip:general:hello sessionID=ses_wh_...
-webhook.done source=zulip command=bashkati4 totalTime=3387 len=38 text=Привет...
+.legion/
+├── command/              # .md промпты (локальный кэш)
+├── integrations.jsonc   # Routing (в .gitignore)
+├── bots.jsonc           # Реестр ботов (в .gitignore)
+├── integrations.md      # Это руководство
+├── mcp-bot-factory/     # MCP: управление ботами
+├── mcp-zulip/           # MCP: Zulip API
+└── mcp-s3-storage/      # MCP: S3 storage
+
+S3 (legion-bots):
+├── bot-prompts/{name}/prompt.md    # Промпт (primary storage)
+├── bot-prompts/{name}/config.json  # Конфиг + service_tokens
+└── bot-prompts/{name}/history/     # История версий промпта
+
+debug/
+├── .env                 # Конфигурация контейнера
+├── generate_secrets.sh  # Генерация паролей
+├── secrets/             # Пароли (в .gitignore)
+└── bootstrap.sh         # Первичная настройка
 ```
 
-### Таймауты
+---
 
-Zulip outgoing webhook по умолчанию ждёт ответ **10 секунд**. Если модель
-медленная (Ollama без GPU, RAGFlow, большие файлы) — таймаут может не
-хватить, пользователь увидит `Bot is unavailable`.
+## 12. Важные замечания
 
-Для Zulip в Docker расширяется переменной окружения:
-
-```yaml
-environment:
-  SETTING_OUTGOING_WEBHOOK_TIMEOUT_SECONDS: "120"
-```
-
-Для других источников (Telegram, Slack) — настраивается на стороне
-отправителя.
+- **Токены не в integrations.jsonc:** `tokens: {}`. Валидация через S3 per-bot конфиг. Auto-learn при первом вебхуке.
+- **S3 — primary storage:** Промпты и конфиги в S3. `/webhook/reload` подтягивает из S3 в локальный кэш.
+- **Host header для Zulip API:** Все запросы к Zulip API из Docker — с заголовком `Host: legion.zulip.local:8443`.
+- **Payload URL:** `http://legion.local:3000/webhook/zulip` (legion.local — статический IP 172.18.0.10).
+- **Static IP в docker-compose:** `legion.networks.legion-net.ipv4_address: 172.18.0.10`.
+- **Zulip worker timeout:** Патчить `MAX_CONSUME_SECONDS = 120` после каждого обновления Zulip.
+- **После рестарта Zulip:** Очередь outgoing webhooks очищается. Первый DM может не дойти — отправить второй.
+- **Session per bot:** Ключ сессии включает `botEmail`, контекст разных ботов не смешивается.
+- **LEGION_PAYLOAD_URL:** Переменная окружения для payload URL новых ботов. По умолчанию `http://legion.local:3000/webhook/zulip`.

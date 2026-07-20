@@ -1,0 +1,25 @@
+{
+  // Конфигурация ботов Legion.
+  // Source of truth: этот файл. bot-factory MCP синхронизирует routing в integrations.jsonc.
+  // API-ключи и токены хранятся ТОЛЬКО в этом файле (не в integrations.jsonc).
+  "bots": [
+    {
+      "name": "example-bot",
+      "description": "Пример бота",
+      "agent": "general",
+      "stream": "example-stream",
+      "model": "opencode-go/deepseek-v4-flash",
+      "mcp": { "zulip": true, "s3-storage": true },
+      "allow": ["user@example.com"],
+      "ragflow_dataset": "dataset-id",
+      "zulip_email": "examplebot-bot@zulip.local",
+      "zulip_api_key": "CHANGE_ME",
+      "zulip_user_id": 0,
+      "self_update": false
+    }
+  ],
+  "s3": {
+    "bucket": "legion-bots",
+    "prefix": "bot-configs"
+  }
+}
