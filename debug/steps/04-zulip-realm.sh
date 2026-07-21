@@ -11,23 +11,25 @@ docker exec legion-zulip-1 su zulip -c '
     "Legion" a.stepanov@2035.university "Admin" --string-id=legion
 ' 2>/dev/null && ok "Realm создан" || warn "Realm уже существует"
 
-# Настроить админа
-zulip_django '
+# Настроить админа (переменные экранированы для docker exec)
+docker exec legion-zulip-1 su zulip -c "
+  /home/zulip/deployments/current/manage.py shell -c '
 from zerver.models import UserProfile
 from django.contrib.auth.hashers import make_password
 try:
     u = UserProfile.objects.get(id=8)
-    u.email = "'"$ZULIP_ADMIN_EMAIL"'"
-    u.delivery_email = "'"$ZULIP_ADMIN_EMAIL"'"
-    u.full_name = "Admin"
-    u.password = make_password("'"$ZULIP_ADMIN_PASSWORD"'")
+    u.email = \"$ZULIP_ADMIN_EMAIL\"
+    u.delivery_email = \"$ZULIP_ADMIN_EMAIL\"
+    u.full_name = \"Admin\"
+    u.password = make_password(\"$ZULIP_ADMIN_PASSWORD\")
     u.is_active = True
     u.is_realm_admin = True
     u.save()
-    print("ok")
+    print(\"ok\")
 except Exception as e:
-    print(f"skip: {e}")
-' | head -1
+    print(f\"skip: {e}\")
+' 2>/dev/null
+
 
 # Получить API ключ
 API_KEY=$(curl -sk "https://localhost:8443/api/v1/fetch_api_key" \
