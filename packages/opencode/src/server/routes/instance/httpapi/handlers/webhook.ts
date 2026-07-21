@@ -123,24 +123,54 @@ const s3ForConfig = process.env.S3_ENDPOINT && process.env.S3_ACCESS_KEY && proc
   : null
 
 // ── Zulip reply helpers ────────────────────────────────────────
+const MAX_ZULIP_MSG = 9000  // 10K limit minus safety margin
+
+async function zulipSendMessage(botEmail: string, botApiKey: string, toEmail: string, content: string): Promise<void> {
+  const zulipUrl = "https://zulip"
+  const zulipHost = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
+  const auth = "Basic " + Buffer.from(`${botEmail}:${botApiKey}`).toString("base64")
+  const res = await fetch(`${zulipUrl}/api/v1/messages`, {
+    method: "POST",
+    headers: { Authorization: auth, "Content-Type": "application/x-www-form-urlencoded", Host: zulipHost },
+    body: new URLSearchParams({ type: "private", to: toEmail, content }).toString(),
+  })
+  const json = await res.json()
+  if (json.result !== "success") {
+    console.error("zulipSendMessage error:", json.msg)
+  }
+}
+
+function chunkContent(content: string): string[] {
+  if (content.length <= MAX_ZULIP_MSG) return [content]
+  const chunks: string[] = []
+  let start = 0
+  while (start < content.length) {
+    let end = start + MAX_ZULIP_MSG
+    if (end >= content.length) {
+      chunks.push(content.slice(start))
+      break
+    }
+    // Try to break at paragraph or sentence boundary
+    const slice = content.slice(start, end)
+    const breakAt = Math.max(
+      slice.lastIndexOf("\n\n"),
+      slice.lastIndexOf("\n"),
+      slice.lastIndexOf(". "),
+      slice.lastIndexOf(" "),
+    )
+    end = breakAt > MAX_ZULIP_MSG / 2 ? start + breakAt + 1 : end
+    chunks.push(content.slice(start, end))
+    start = end
+  }
+  return chunks
+}
+
 async function sendZulipReply(botEmail: string, botApiKey: string, toEmail: string, content: string): Promise<void> {
   try {
-    const zulipUrl = "https://zulip"
-    const zulipHost = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
-    const auth = "Basic " + Buffer.from(`${botEmail}:${botApiKey}`).toString("base64")
-    const headers: Record<string, string> = {
-      Authorization: auth,
-      "Content-Type": "application/x-www-form-urlencoded",
-    }
-    headers["Host"] = zulipHost
-    const res = await fetch(`${zulipUrl}/api/v1/messages`, {
-      method: "POST",
-      headers,
-      body: new URLSearchParams({ type: "private", to: toEmail, content }).toString(),
-    })
-    const json = await res.json()
-    if (json.result !== "success") {
-      console.error("sendZulipReply error:", json.msg, "for email", botEmail, "to", toEmail)
+    const parts = chunkContent(content)
+    for (let i = 0; i < parts.length; i++) {
+      const label = parts.length > 1 ? `(${i + 1}/${parts.length})\n\n` : ""
+      await zulipSendMessage(botEmail, botApiKey, toEmail, label + parts[i])
     }
   } catch (e: any) {
     console.error("sendZulipReply exception:", e.message)
