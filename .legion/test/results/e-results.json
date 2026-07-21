@@ -1,0 +1,102 @@
+[
+  {
+    "seq": 0,
+    "ackMs": 2028,
+    "llmMs": 4040
+  },
+  {
+    "seq": 1,
+    "ackMs": 2038,
+    "llmMs": 4055
+  },
+  {
+    "seq": 2,
+    "ackMs": 2035,
+    "llmMs": 4046
+  },
+  {
+    "seq": 3,
+    "ackMs": 2014,
+    "llmMs": 4026
+  },
+  {
+    "seq": 4,
+    "ackMs": 2013,
+    "llmMs": 4027
+  },
+  {
+    "seq": 5,
+    "ackMs": 2012,
+    "llmMs": 4041
+  },
+  {
+    "seq": 6,
+    "ackMs": 2014,
+    "llmMs": 4026
+  },
+  {
+    "seq": 7,
+    "ackMs": 2010,
+    "llmMs": 4024
+  },
+  {
+    "seq": 8,
+    "ackMs": 2016,
+    "llmMs": 4031
+  },
+  {
+    "seq": 9,
+    "ackMs": 2011,
+    "llmMs": 4035
+  },
+  {
+    "seq": 10,
+    "ackMs": 2014,
+    "llmMs": 4036
+  },
+  {
+    "seq": 11,
+    "ackMs": 2016,
+    "llmMs": 4029
+  },
+  {
+    "seq": 12,
+    "ackMs": 2014,
+    "llmMs": 4028
+  },
+  {
+    "seq": 13,
+    "ackMs": 2015,
+    "llmMs": 4029
+  },
+  {
+    "seq": 14,
+    "ackMs": 2013,
+    "llmMs": 4027
+  },
+  {
+    "seq": 15,
+    "ackMs": 2014,
+    "llmMs": 4029
+  },
+  {
+    "seq": 16,
+    "ackMs": 2016,
+    "llmMs": 4033
+  },
+  {
+    "seq": 17,
+    "ackMs": 2014,
+    "llmMs": 4028
+  },
+  {
+    "seq": 18,
+    "ackMs": 2027,
+    "llmMs": 4047
+  },
+  {
+    "seq": 19,
+    "ackMs": 2014,
+    "llmMs": 4027
+  }
+]

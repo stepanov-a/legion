@@ -1,0 +1,112 @@
+[
+  {
+    "seq": 2,
+    "user": "user3",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 175,
+    "sentMs": 1784587371776,
+    "ackMs": 2014,
+    "llmMs": 4031,
+    "ackText": ":check: Принял запрос. Может потребоваться некотор",
+    "llmText": "Понял. Чем могу помочь?"
+  },
+  {
+    "seq": 8,
+    "user": "user3",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 178,
+    "sentMs": 1784587371776,
+    "ackMs": 2015,
+    "llmMs": 4030,
+    "ackText": ":check: Принял запрос. Может потребоваться некотор",
+    "llmText": "Понял. Чем могу помочь?"
+  },
+  {
+    "seq": 9,
+    "user": "user1",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 173,
+    "sentMs": 1784587371776,
+    "ackMs": 4030,
+    "llmMs": 6052,
+    "ackText": ":check: Принял запрос. Может потребоваться некотор",
+    "llmText": ":check: Принял запрос. Может потребоваться некоторое время — ожидайте ответ..."
+  },
+  {
+    "seq": 3,
+    "user": "user1",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 176,
+    "sentMs": 1784587371776,
+    "ackMs": 4031,
+    "llmMs": 6046,
+    "ackText": ":check: Принял запрос. Может потребоваться некотор",
+    "llmText": ":check: Принял запрос. Может потребоваться некоторое время — ожидайте ответ..."
+  },
+  {
+    "seq": 0,
+    "user": "user1",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 181,
+    "sentMs": 1784587371775,
+    "ackMs": 4029,
+    "llmMs": 6042,
+    "ackText": ":check: Принял запрос. Может потребоваться некотор",
+    "llmText": ":check: Принял запрос. Может потребоваться некоторое время — ожидайте ответ..."
+  },
+  {
+    "seq": 5,
+    "user": "user3",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 183,
+    "sentMs": 1784587371776,
+    "ackMs": 4028,
+    "llmMs": 6043,
+    "ackText": ":check:",
+    "llmText": "Понял. Чем могу помочь?"
+  },
+  {
+    "seq": 6,
+    "user": "user1",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 179,
+    "sentMs": 1784587371776,
+    "ackMs": 4080,
+    "llmMs": 6094,
+    "ackText": ":check: Принял запрос. Может потребоваться некотор",
+    "llmText": ":check: Принял запрос. Может потребоваться некоторое время — ожидайте ответ..."
+  },
+  {
+    "seq": 4,
+    "user": "user2",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 174,
+    "sentMs": 1784587371776,
+    "ackMs": 14096,
+    "llmMs": 14096,
+    "ackText": ":check: Принял запрос. Может потребоваться некотор",
+    "llmText": ":check: Принял запрос. Может потребоваться некотор"
+  },
+  {
+    "seq": 7,
+    "user": "user2",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 177,
+    "sentMs": 1784587371776,
+    "ackMs": 14103,
+    "llmMs": 14103,
+    "ackText": ":check: Принял запрос. Может потребоваться некотор",
+    "llmText": ":check: Принял запрос. Может потребоваться некотор"
+  },
+  {
+    "seq": 1,
+    "user": "user2",
+    "bot": "consultantbot-bot@zulip.local",
+    "msgId": 180,
+    "sentMs": 1784587371776,
+    "ackMs": 14103,
+    "llmMs": 14103,
+    "ackText": ":check: Принял запрос. Может потребоваться некотор",
+    "llmText": ":check: Принял запрос. Может потребоваться некотор"
+  }
+]

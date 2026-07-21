@@ -314,8 +314,8 @@ services:
     env_file: ./debug/.env
     environment:
       LEGION_PROJECT_DIR: /legion
-      LEGION_ZULIP_URL: "https://zulip-ext:8443"
-      ZULIP_URL: "https://zulip-ext:8443"
+      LEGION_ZULIP_URL: "https://zulip:443"
+      ZULIP_URL: "https://zulip:443"
       S3_ENDPOINT: "http://minio:9000"
       RAGFLOW_API: "http://ragflow:9380"
       NODE_TLS_REJECT_UNAUTHORIZED: "0"

@@ -199,8 +199,22 @@ echo -e "  ${CYAN}API key:${NC}   $NEW_API_KEY"
 echo -e "  ${CYAN}MinIO:${NC}     http://localhost:${MINIO_API_PORT:-9000}"
 echo -e "  ${CYAN}Console:${NC}   http://localhost:${MINIO_CONSOLE_PORT:-9001} (admin/admin)"
 echo ""
+# ── 8. Патч таймаута outgoing webhooks (Zulip worker) ────────────
+info "Патч таймаута Zulip worker (MAX_CONSUME_SECONDS = 120)..."
+if docker exec legion-zulip-1 grep -q "MAX_CONSUME_SECONDS = 120" \
+  /home/zulip/deployments/current/zerver/worker/outgoing_webhooks.py 2>/dev/null; then
+  ok "Уже пропатчен"
+else
+  docker exec legion-zulip-1 sed -i \
+    "/^class OutgoingWebhookWorker/a \ \ \ \ MAX_CONSUME_SECONDS = 120" \
+    /home/zulip/deployments/current/zerver/worker/outgoing_webhooks.py
+  docker exec legion-zulip-1 supervisorctl restart \
+    "zulip-workers:zulip_events_outgoing_webhooks" 2>/dev/null
+  ok "Worker timeout увеличен до 120 секунд"
+fi
+
+echo ""
 echo -e "  ${YELLOW}Запусти Legion (сервер + прогрев MCP):${NC}"
-echo -e "  ${CYAN}  export \$(grep -v '^#' $SCRIPT_DIR/.env | xargs)${NC}"
 echo -e "  ${CYAN}  cd legion/packages/opencode && OPENCODE_SERVER_PASSWORD=test bun run src/index.ts serve --port 3000 &${NC}"
 echo -e "  ${CYAN}  sleep 15 && curl -sk -X POST http://localhost:3000/webhook/warmup${NC}"
 echo ""

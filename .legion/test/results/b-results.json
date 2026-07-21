@@ -1,0 +1,37 @@
+[
+  {
+    "bot": "load-bot-0",
+    "timeMs": 6619,
+    "response": {
+      "content": "✅"
+    }
+  },
+  {
+    "bot": "load-bot-1",
+    "timeMs": 7845,
+    "response": {
+      "content": "✅"
+    }
+  },
+  {
+    "bot": "load-bot-2",
+    "timeMs": 6803,
+    "response": {
+      "content": "✅"
+    }
+  },
+  {
+    "bot": "load-bot-3",
+    "timeMs": 7011,
+    "response": {
+      "content": "✅"
+    }
+  },
+  {
+    "bot": "load-bot-4",
+    "timeMs": 7520,
+    "response": {
+      "content": "✅"
+    }
+  }
+]
