@@ -10,13 +10,15 @@ fi
 info "Синхронизация конфигов и промптов в S3..."
 
 BOTS_DATA=$(cat /tmp/bots_data.json)
+ADMIN_ID=$(echo "$BOTS_DATA" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['admin']['id'])")
 ADMIN_KEY=$(echo "$BOTS_DATA" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['admin']['api_key'])")
 ADMIN_STOKEN=$(echo "$BOTS_DATA" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['admin']['stoken'])")
+CONS_ID=$(echo "$BOTS_DATA" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['consultantbot']['id'])")
 CONS_KEY=$(echo "$BOTS_DATA" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['consultantbot']['api_key'])")
 CONS_STOKEN=$(echo "$BOTS_DATA" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['consultantbot']['stoken'])")
 
 # Запись bots.jsonc
-cat > "$LEGION_PROJECT_DIR/.legion/bots.jsonc" << JSONEOF
+cat > "$LEGION_DIR/.legion/bots.jsonc" << BOTSEOF
 {
   "bots": [
     {
@@ -44,7 +46,7 @@ cat > "$LEGION_PROJECT_DIR/.legion/bots.jsonc" << JSONEOF
     }
   ]
 }
-JSONEOF
+BOTSEOF
 
 # Sync в S3 через bun внутри контейнера
 docker exec legion-legion-1 bash -c "
@@ -56,21 +58,24 @@ const s3 = new S3Client({ region: 'us-east-1', endpoint: 'http://minio:9000',
   credentials: { accessKeyId: 'minioadmin', secretAccessKey: 'minioadmin' }, forcePathStyle: true })
 
 const BOTS = JSON.parse(fs.readFileSync('/legion/.legion/bots.jsonc', 'utf-8')).bots
-const TOKENS: Record<string, {stoken: string}> = {
-  admin: { stoken: '$ADMIN_STOKEN' },
-  'bot-consultant': { stoken: '$CONS_STOKEN' },
+const TOKENS: Record<string, string> = {
+  admin: '$ADMIN_STOKEN',
+  'bot-consultant': '$CONS_STOKEN',
 }
 
 for (const bot of BOTS) {
-  // Config with service token
-  const cfg = { ...bot, service_tokens: TOKENS[bot.name]?.stoken ? [TOKENS[bot.name].stoken] : [] }
-  await s3.send(new PutObjectCommand({ Bucket: 'legion-bots', Key: 'bot-prompts/' + bot.name + '/config.json', Body: JSON.stringify(cfg, null, 2) }))
+  const cfg = { ...bot, service_tokens: TOKENS[bot.name] ? [TOKENS[bot.name]] : [] }
+  await s3.send(new PutObjectCommand({
+    Bucket: 'legion-bots', Key: 'bot-prompts/' + bot.name + '/config.json',
+    Body: JSON.stringify(cfg, null, 2), ContentType: 'application/json',
+  }))
   console.log('cfg:', bot.name)
 
-  // Prompt
   try {
     const md = fs.readFileSync('/legion/.legion/command/' + bot.name + '.md', 'utf-8')
-    await s3.send(new PutObjectCommand({ Bucket: 'legion-bots', Key: 'bot-prompts/' + bot.name + '/prompt.md', Body: md }))
+    await s3.send(new PutObjectCommand({
+      Bucket: 'legion-bots', Key: 'bot-prompts/' + bot.name + '/prompt.md', Body: md, ContentType: 'text/markdown',
+    }))
     console.log('md: ', bot.name)
   } catch(e) { console.log('no md for', bot.name) }
 }
@@ -78,4 +83,4 @@ SYNCEOF
 bun run /tmp/bootstrap_sync.ts 2>/dev/null
 "
 
-ok "Конфиги и промпты синхронизированы в S3"
+ok "bots.jsonc + configs + prompts синхронизированы в S3"
