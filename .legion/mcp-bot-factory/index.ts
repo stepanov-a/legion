@@ -313,7 +313,8 @@ class BotConfig {
 
       const cfg = this.load()
       for (const bot of cfg.bots) {
-        const existing = (zulipSource.routing ?? []).findIndex((r: any) => r.command === bot.name)
+        // Stream routing
+        const existing = (zulipSource.routing ?? []).findIndex((r: any) => r.command === bot.name && !r.field)
         const route = { stream: bot.stream, command: bot.name }
         if (existing >= 0) zulipSource.routing[existing] = route
         else {
@@ -323,6 +324,21 @@ class BotConfig {
           if (!zulipSource.routing) zulipSource.routing = []
           if (wildcardIdx >= 0) zulipSource.routing.splice(wildcardIdx, 0, route)
           else zulipSource.routing.push(route)
+        }
+
+        // bot_email routing (for DMs)
+        if (bot.zulip_email) {
+          const emailExisting = (zulipSource.routing ?? []).findIndex((r: any) =>
+            r.field === "bot_email" && r.bot_email === bot.zulip_email
+          )
+          const emailRoute = { field: "bot_email", bot_email: bot.zulip_email, command: bot.name }
+          if (emailExisting < 0) {
+            const wildcardIdx = (zulipSource.routing ?? []).findIndex((r: any) =>
+              r.stream === "*" || r.chat_id === "*"
+            )
+            if (wildcardIdx >= 0) zulipSource.routing.splice(wildcardIdx, 0, emailRoute)
+            else zulipSource.routing.push(emailRoute)
+          }
         }
       }
       fs.writeFileSync(INTEGRATIONS_PATH, JSON.stringify(intCfg, null, 2) + "\n", "utf-8")
@@ -492,7 +508,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       }
 
       const botUserId = botData.user_id
-      const botEmail = botData.email ?? `${shortName}-bot@${new URL(ZULIP_URL).hostname}`
+      const botEmail = botData.email ?? `${shortName}-bot@zulip.local`
       const botApiKey = botData.api_key ?? ""
 
       await zulipFetch(`/bots/${botUserId}`, {
