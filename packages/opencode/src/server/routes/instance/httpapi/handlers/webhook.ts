@@ -273,7 +273,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       const stream = msg.type === "stream"
         ? (typeof msg.display_recipient === "string" ? msg.display_recipient : msg.chat ?? "dm")
         : "dm"
-      const topic = msg.topic ?? ""
+      const topic = msg.topic ?? msg.subject ?? msg.topic_links?.[0]?.text ?? ""
 
       yield* Effect.logInfo("webhook.ingress", { source: sourceName, sender, stream, topic, contentLen: content.length })
 
