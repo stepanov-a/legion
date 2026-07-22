@@ -449,10 +449,11 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       const hasTools = Object.keys(mcp).length > 0
       const isDm = stream === "dm"
       const replyTarget = isDm ? senderEmail : stream
+      const replyTopic = isDm ? undefined : (topic || "ответ")
       if (hasTools && whBotEmail && commandName !== "default") {
         const botApiKey = yield* Effect.tryPromise(() => getBotApiKey(commandName)).pipe(Effect.catch(() => Effect.succeed(null)))
         if (botApiKey) {
-          sendZulipReply(whBotEmail, botApiKey, replyTarget, "✅ Принял запрос. Может потребоваться некоторое время — ожидайте ответ...", isDm ? "private" : "stream", isDm ? undefined : stream, isDm ? undefined : topic)
+          sendZulipReply(whBotEmail, botApiKey, replyTarget, "✅ Принял запрос.", isDm ? "private" : "stream", isDm ? undefined : stream, replyTopic)
         }
       }
 
@@ -463,7 +464,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         if (responseText && commandName !== "default") {
           const botApiKey = yield* Effect.tryPromise(() => getBotApiKey(commandName)).pipe(Effect.catch(() => Effect.succeed(null)))
           if (botApiKey) {
-            sendZulipReply(whBotEmail, botApiKey, replyTarget, responseText, isDm ? "private" : "stream", isDm ? undefined : stream, isDm ? undefined : topic)
+            sendZulipReply(whBotEmail, botApiKey, replyTarget, responseText, isDm ? "private" : "stream", isDm ? undefined : stream, replyTopic)
           }
         }
       }
