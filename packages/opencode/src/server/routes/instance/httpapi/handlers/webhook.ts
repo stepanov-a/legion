@@ -301,6 +301,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       const stream = msg.type === "stream"
         ? (typeof msg.display_recipient === "string" ? msg.display_recipient : msg.chat ?? "dm")
         : "dm"
+      const isDm = stream === "dm"
       const topic = msg.topic ?? msg.subject ?? msg.topic_links?.[0]?.text ?? ""
 
       yield* Effect.logInfo("webhook.ingress", { source: sourceName, sender, stream, topic, contentLen: content.length })
@@ -482,7 +483,6 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
 
       // Send ack only if bot has MCP tools (complex request may take time)
       const hasTools = Object.keys(mcp).length > 0
-      const isDm = stream === "dm"
       const replyTarget = isDm ? senderEmail : stream
       const replyTopic = isDm ? undefined : (topic || "ответ")
       if (hasTools && whBotEmail && commandName !== "default") {
