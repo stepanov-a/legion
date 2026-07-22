@@ -431,6 +431,15 @@ const tools = [
       required: ["name"],
     },
   },
+  {
+    name: "reset_session",
+    description: "Сбросить сессию диалога (очистить историю LLM). После этого следующий запрос начнётся с чистого контекста.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
 ]
 
 // ── Tool handlers ────────────────────────────────────────────────
@@ -836,6 +845,21 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
           type: "text",
           text: [`✅ Бот "${safeName}" полностью удалён.`, ``, ...results].join("\n"),
         }],
+      }
+    }
+
+    case "reset_session": {
+      try {
+        const res = await fetch("http://localhost:3000/webhook/reset-session", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        })
+        const text = await res.text()
+        const json = JSON.parse(text)
+        return { content: [{ type: "text", text: json.content ?? "✅ Session cache cleared." }] }
+      } catch (e: any) {
+        return { content: [{ type: "text", text: `❌ Failed to reset session: ${e.message}` }] }
       }
     }
 

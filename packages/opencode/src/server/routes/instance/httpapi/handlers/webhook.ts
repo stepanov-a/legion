@@ -244,8 +244,16 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       const startTime = Date.now()
       const sourceName = ctx.params.source
       const payload = ctx.payload as any
-      const msg = payload?.message ?? {}
 
+      // ── 1. Session reset ────────────────────────────────────────────
+      if (sourceName === "reset-session") {
+        const count = sessionCache.size
+        sessionCache.clear()
+        Effect.logInfo("webhook.session_reset_all", { cleared: count })
+        return { content: `✅ All sessions cleared (${count}).` }
+      }
+
+      const msg = payload?.message ?? {}
       const senderEmail = msg.sender_email ?? ""
       const sender = msg.sender_full_name ?? msg.sender_username ?? msg.from ?? "Unknown"
       const content = msg.content ?? msg.text ?? ""
@@ -256,7 +264,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
 
       Effect.logInfo("webhook.ingress", { source: sourceName, sender, stream, topic, contentLen: content.length })
 
-      // ── 1. Конфиг ──────────────────────────────────────────────────
+      // ── 2. Конфиг ──────────────────────────────────────────────────
       const config: any = yield* Effect.sync(() => loadConfig()).pipe(Effect.catch(() => Effect.succeed(undefined)))
       if (!config) return { content: "❌ Config not found." }
       const source = config?.sources?.find((s: any) => s.name === sourceName)
@@ -295,19 +303,6 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
           Effect.logWarning("webhook.token_mismatch", { botEmail, commandName })
           return { content: "❌ Invalid token." }
         }
-      }
-
-      // ── 4. Session reset ─────────────────────────────────────────────
-      const cleanContent = content.replace(/<[^>]+>/g, "").trim().toLowerCase()
-      const resetTrigger = cleanContent.match(/^(сбросить сессию|end session|reset session|начать заново)$/i)
-      if (resetTrigger && commandName !== "default") {
-        const resetKey = sessionCacheKey(sourceName, stream, topic, sender, botEmail)
-        const oldId = sessionCache.get(resetKey)
-        if (oldId) {
-          sessionCache.delete(resetKey)
-          Effect.logInfo("webhook.session_reset", { cacheKey: resetKey, oldSession: oldId })
-        }
-        return { content: "✅ Сессия сброшена. Новая сессия начнётся со следующим сообщением." }
       }
 
       // ── 5. Файлы (download from Zulip, using per-bot API keys from S3) ─
