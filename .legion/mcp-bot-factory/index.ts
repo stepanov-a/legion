@@ -33,6 +33,11 @@ if (s3Available) {
 }
 
 const LEGION_PAYLOAD_URL = process.env.LEGION_PAYLOAD_URL ?? "http://legion.local:3000/webhook/zulip"
+const LEGION_RELOAD_URL = "http://localhost:3000/webhook/reload"
+
+function reloadWebhookCache(): void {
+  fetch(LEGION_RELOAD_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {})
+}
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL ?? "opencode-go/deepseek-v4-flash"
 const LEGION_DIR = path.join(PROJECT_ROOT, ".legion")
 const COMMANDS_DIR = path.join(LEGION_DIR, "command")
@@ -343,6 +348,7 @@ class BotConfig {
         }
       }
       fs.writeFileSync(INTEGRATIONS_PATH, JSON.stringify(intCfg, null, 2) + "\n", "utf-8")
+      reloadWebhookCache()
     } catch {}
   }
 
@@ -353,6 +359,7 @@ class BotConfig {
       if (!zulipSource) return
       zulipSource.routing = (zulipSource.routing ?? []).filter((r: any) => r.command !== botName)
       fs.writeFileSync(INTEGRATIONS_PATH, JSON.stringify(intCfg, null, 2) + "\n", "utf-8")
+      reloadWebhookCache()
     } catch {}
   }
 }

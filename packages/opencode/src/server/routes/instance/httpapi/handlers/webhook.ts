@@ -244,7 +244,6 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       const startTime = Date.now()
       const sourceName = ctx.params.source
       const payload = ctx.payload as any
-
       // ── 1. Session reset ────────────────────────────────────────────
       if (sourceName === "reset-session") {
         const count = sessionCache.size
