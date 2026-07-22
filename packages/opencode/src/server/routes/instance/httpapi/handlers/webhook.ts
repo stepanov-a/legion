@@ -125,14 +125,23 @@ const s3ForConfig = process.env.S3_ENDPOINT && process.env.S3_ACCESS_KEY && proc
 // ── Zulip reply helpers ────────────────────────────────────────
 const MAX_ZULIP_MSG = 9000  // 10K limit minus safety margin
 
-async function zulipSendMessage(botEmail: string, botApiKey: string, toEmail: string, content: string): Promise<void> {
+async function zulipSendMessage(botEmail: string, botApiKey: string, recipient: string, content: string, msgType?: string, topic?: string): Promise<void> {
   const zulipUrl = "https://zulip"
   const zulipHost = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
   const auth = "Basic " + Buffer.from(`${botEmail}:${botApiKey}`).toString("base64")
+  const body: Record<string, string> = { content }
+  if (msgType === "stream") {
+    body.type = "stream"
+    body.to = recipient
+    if (topic) body.topic = topic
+  } else {
+    body.type = "private"
+    body.to = recipient
+  }
   const res = await fetch(`${zulipUrl}/api/v1/messages`, {
     method: "POST",
     headers: { Authorization: auth, "Content-Type": "application/x-www-form-urlencoded", Host: zulipHost },
-    body: new URLSearchParams({ type: "private", to: toEmail, content }).toString(),
+    body: new URLSearchParams(body).toString(),
   })
   const json = await res.json()
   if (json.result !== "success") {
@@ -165,12 +174,17 @@ function chunkContent(content: string): string[] {
   return chunks
 }
 
-async function sendZulipReply(botEmail: string, botApiKey: string, toEmail: string, content: string): Promise<void> {
+async function sendZulipReply(botEmail: string, botApiKey: string, toEmail: string, content: string, msgType?: string, streamName?: string, topic?: string): Promise<void> {
   try {
     const parts = chunkContent(content)
+    const isStream = msgType === "stream" && streamName && streamName !== "dm"
     for (let i = 0; i < parts.length; i++) {
       const label = parts.length > 1 ? `(${i + 1}/${parts.length})\n\n` : ""
-      await zulipSendMessage(botEmail, botApiKey, toEmail, label + parts[i])
+      if (isStream) {
+        await zulipSendMessage(botEmail, botApiKey, streamName!, label + parts[i], "stream", topic)
+      } else {
+        await zulipSendMessage(botEmail, botApiKey, toEmail, label + parts[i])
+      }
     }
   } catch (e: any) {
     console.error("sendZulipReply exception:", e.message)
@@ -433,10 +447,12 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
 
       // Send ack only if bot has MCP tools (complex request may take time)
       const hasTools = Object.keys(mcp).length > 0
+      const isDm = stream === "dm"
+      const replyTarget = isDm ? senderEmail : stream
       if (hasTools && whBotEmail && commandName !== "default") {
         const botApiKey = yield* Effect.tryPromise(() => getBotApiKey(commandName)).pipe(Effect.catch(() => Effect.succeed(null)))
         if (botApiKey) {
-          sendZulipReply(whBotEmail, botApiKey, senderEmail, "✅ Принял запрос. Может потребоваться некоторое время — ожидайте ответ...")
+          sendZulipReply(whBotEmail, botApiKey, replyTarget, "✅ Принял запрос. Может потребоваться некоторое время — ожидайте ответ...", isDm ? "private" : "stream", isDm ? undefined : stream, isDm ? undefined : topic)
         }
       }
 
@@ -447,7 +463,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         if (responseText && commandName !== "default") {
           const botApiKey = yield* Effect.tryPromise(() => getBotApiKey(commandName)).pipe(Effect.catch(() => Effect.succeed(null)))
           if (botApiKey) {
-            sendZulipReply(whBotEmail, botApiKey, senderEmail, responseText)
+            sendZulipReply(whBotEmail, botApiKey, replyTarget, responseText, isDm ? "private" : "stream", isDm ? undefined : stream, isDm ? undefined : topic)
           }
         }
       }
