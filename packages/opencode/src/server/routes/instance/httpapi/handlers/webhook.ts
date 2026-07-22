@@ -297,7 +297,20 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         }
       }
 
-      // ── 4. Файлы (download from Zulip, using per-bot API keys from S3) ─
+      // ── 4. Session reset ─────────────────────────────────────────────
+      const cleanContent = content.replace(/<[^>]+>/g, "").trim().toLowerCase()
+      const resetTrigger = cleanContent.match(/^(сбросить сессию|end session|reset session|начать заново)$/i)
+      if (resetTrigger && commandName !== "default") {
+        const resetKey = sessionCacheKey(sourceName, stream, topic, sender, botEmail)
+        const oldId = sessionCache.get(resetKey)
+        if (oldId) {
+          sessionCache.delete(resetKey)
+          Effect.logInfo("webhook.session_reset", { cacheKey: resetKey, oldSession: oldId })
+        }
+        return { content: "✅ Сессия сброшена. Новая сессия начнётся со следующим сообщением." }
+      }
+
+      // ── 5. Файлы (download from Zulip, using per-bot API keys from S3) ─
       const fileParts: Array<{ url: string; mime: string; filename: string; bytes?: Buffer; zulipPath?: string; botKey?: string }> = []
       if (zulipUrl && commandName !== "default") {
         const botCfgKey = botS3ConfigKey(commandName)
