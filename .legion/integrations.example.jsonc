@@ -1,19 +1,16 @@
 {
+  // Routing для входящих вебхуков.
+  // Токены больше не здесь — они в S3 per-bot конфигах (bot-prompts/{name}/config.json).
+  // Подробнее: .legion/integrations.md
   "sources": [
     {
       "name": "zulip",
       "type": "webhook",
       "endpoint": "POST /webhook/zulip",
-      "zulip_url": "https://localhost:8443",
+      "zulip_url": "https://legion.zulip.local:8443",
       "commands_dir": ".legion/command",
-      "tokens": {
-        "bashkati4-bot@zulip.local": "CHANGE_ME",
-        "adminbotv2-bot@zulip.local": "CHANGE_ME"
-      },
-      "bot_api_keys": {
-        "bashkati4-bot@zulip.local": "CHANGE_ME",
-        "adminbotv2-bot@zulip.local": "CHANGE_ME"
-      },
+      "tokens": {},
+      "bot_api_keys": {},
       "s3": {
         "bucket": "legion-bots",
         "prefix": "bot-files",
@@ -21,10 +18,9 @@
         "endpoint": "http://localhost:9000"
       },
       "routing": [
-        { "stream": "deep-research", "command": "deep-research" },
-        { "stream": "admin",         "command": "admin" },
-        { "stream": "general",       "command": "bashkati4" },
-        { "stream": "*",             "command": "bashkati4" }
+        { "stream": "admin",          "command": "admin" },
+        { "field": "bot_email", "bot_email": "adminbotv2-bot@zulip.local", "command": "admin" },
+        { "stream": "*",              "command": "bashkati4" }
       ]
     }
   ],
