@@ -468,7 +468,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
 
       // 1. Создаём .md файл команды
       const frontmatter: Record<string, string> = { name: safeName, description, agent }
-      if (modelStr) frontmatter.model = modelStr
+      frontmatter.model = modelStr || "opencode-go/deepseek-v4-flash"
       if (allow) frontmatter.allow = JSON.stringify(allow.split(",").map((s: string) => s.trim()))
       if (mcpStr || selfUpdate) {
         const mcpObj: Record<string, boolean> = {}
@@ -509,7 +509,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       try {
         botData = await zulipFetch("/bots", {
           method: "POST",
-          body: new URLSearchParams({ full_name: description, short_name: shortName, bot_type: "3" }).toString(),
+          body: new URLSearchParams({ full_name: safeName, short_name: shortName, bot_type: "3" }).toString(),
         })
       } catch (e: any) {
         fs.unlinkSync(mdPath)
@@ -525,6 +525,22 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
         body: new URLSearchParams({ service_interface: "1", service_payload_url: JSON.stringify(payloadUrl) }).toString(),
       })
       results.push(`✅ Zulip-бот \`${description}\` создан (${botEmail})`)
+
+      // 2b. Подписываем бота на канал (чтобы работали сообщения из stream, не только DM)
+      if (stream && stream !== "*") {
+        try {
+          await zulipFetch("/users/me/subscriptions", {
+            method: "POST",
+            body: new URLSearchParams({
+              subscriptions: JSON.stringify([{ name: stream }]),
+              principals: JSON.stringify([botEmail]),
+            }).toString(),
+          })
+          results.push(`✅ Бот подписан на канал #${stream}`)
+        } catch (e: any) {
+          results.push(`⚠️ Не удалось подписать бота на канал #${stream}: ${e.message}`)
+        }
+      }
 
       // 3. Регистрируем в BotConfig (write per-bot config to S3)
       const allowList = allow ? allow.split(",").map((s: string) => s.trim()) : undefined
