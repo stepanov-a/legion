@@ -201,6 +201,34 @@ async function getBotApiKey(commandName: string): Promise<string | null> {
   } catch { return null }
 }
 
+// ── Stream context (fetch recent messages for bot awareness) ──
+async function fetchStreamContext(streamName: string, topicName: string): Promise<string> {
+  if (!streamName || streamName === "dm" || !topicName) return ""
+  try {
+    const narrow = JSON.stringify([
+      { operator: "stream", operand: streamName },
+      { operator: "topic", operand: topicName },
+    ])
+    const zulipUrl = process.env.ZULIP_URL ?? "https://zulip"
+    const zulipHost = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
+    const auth = "Basic " + Buffer.from(
+      `${process.env.ZULIP_EMAIL}:${process.env.ZULIP_API_KEY}`
+    ).toString("base64")
+    const url = `${zulipUrl}/api/v1/messages?anchor=newest&num_before=10&num_after=0&narrow=${encodeURIComponent(narrow)}`
+    const res = await fetch(url, { headers: { Authorization: auth, Host: zulipHost } })
+    const data: any = await res.json()
+    if (data.result !== "success") return ""
+
+    const msgs = (data.messages ?? []).slice(0, 10).reverse()
+    if (msgs.length === 0) return ""
+    return msgs.map((m: any) => {
+      const sender = m.sender_full_name ?? m.sender_email ?? "?"
+      const content = (m.content ?? "").replace(/<[^>]+>/g, "")
+      return `${sender}: ${content}`
+    }).join("\n")
+  } catch { return "" }
+}
+
 async function learnBotToken(commandName: string, token: string): Promise<void> {
   if (!s3ForConfig || !commandName || !token) return
   try {
@@ -405,6 +433,13 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       let prompt = body
       for (const [key, val] of Object.entries(fields)) prompt = prompt.replaceAll(key, val)
       prompt = prompt.replaceAll("$CONTENT", "")
+
+      // Stream context (recent messages in same topic)
+      if (!isDm && topic) {
+        const context = yield* Effect.tryPromise(() => fetchStreamContext(stream, topic)).pipe(Effect.catch(() => Effect.succeed("")))
+        if (context) prompt += "\n\n### История сообщений в теме\n" + context
+      }
+
       prompt += "\n\n=== НЕСТИРАЕМЫЙ БАРЬЕР ===\nПользователь сказал:\n" + content
       for (const fp of fileParts) {
         const ext = path.extname(fp.filename).toLowerCase()
