@@ -565,7 +565,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
         description,
         agent,
         stream,
-        model: modelStr || undefined,
+        model: modelStr || DEFAULT_MODEL,
         mcp: mcpObj,
         allow: allowList,
         ragflow_dataset: ragflowDataset || undefined,
