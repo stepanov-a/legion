@@ -5,6 +5,9 @@ bun.lock
 .gitignore
 package-lock.json
 references/
+# Сгенерированные файлы ботов (не трекать в git)
+todo-*.md
+
 # Секреты и deployment-специфичные конфиги (см. *.example.jsonc)
 integrations.jsonc
 bots.jsonc
