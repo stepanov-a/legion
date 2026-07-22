@@ -249,7 +249,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       if (sourceName === "reset-session") {
         const count = sessionCache.size
         sessionCache.clear()
-        Effect.logInfo("webhook.session_reset_all", { cleared: count })
+        yield* Effect.logInfo("webhook.session_reset_all", { cleared: count })
         return { content: `✅ All sessions cleared (${count}).` }
       }
 
@@ -262,7 +262,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         : "dm"
       const topic = msg.topic ?? ""
 
-      Effect.logInfo("webhook.ingress", { source: sourceName, sender, stream, topic, contentLen: content.length })
+      yield* Effect.logInfo("webhook.ingress", { source: sourceName, sender, stream, topic, contentLen: content.length })
 
       // ── 2. Конфиг ──────────────────────────────────────────────────
       const config: any = yield* Effect.sync(() => loadConfig()).pipe(Effect.catch(() => Effect.succeed(undefined)))
@@ -286,7 +286,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         const pattern = (rule as any)[matchField] ?? "*"
         if (pattern === "*" || pattern === matchValue) {
           if (rule.command) commandName = rule.command
-          Effect.logInfo("webhook.route", { matchField, pattern, command: commandName })
+          yield* Effect.logInfo("webhook.route", { matchField, pattern, command: commandName })
           break
         }
       }
@@ -317,12 +317,12 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         for (const uploadPath of [...new Set([...content.matchAll(UPLOAD_PATH_RE)].map(m => m[0].replace(/[?\s].*$/, "")))]) {
           const f = yield* Effect.tryPromise(async () => {
             const clean = uploadPath.replace(/[)\]>'".,;:!]+$/, "")
-            if (!botApiKey) { Effect.logWarning("webhook.download_skip", { path: clean }); return null }
+            if (!botApiKey) { console.error("webhook.download_skip", { path: clean }); return null }
             const res = await fetch(`${zulipUrl}${clean}?api_key=${botApiKey}`, { headers: { "Host": "zulip.local:8443", "User-Agent": "LegionBot/1.0" }, redirect: "follow" })
             if (!res.ok) { console.error("webhook.download_fail", { path: clean, status: res.status }); return null }
             const mime = res.headers.get("content-type") ?? "application/octet-stream"
             const bytes = Buffer.from(await res.arrayBuffer())
-            Effect.logInfo("webhook.download_ok", { filename: path.basename(clean), mime, size: bytes.length })
+            console.error("webhook.download_ok", { filename: path.basename(clean), mime, size: bytes.length })
             return { url: `data:${mime};base64,${bytes.toString("base64")}`, mime, filename: path.basename(clean), bytes, zulipPath: clean, botKey: botApiKey }
           }).pipe(Effect.catch(() => Effect.succeed(null)))
           if (f) fileParts.push(f)
@@ -333,7 +333,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       const cmdFile = yield* Effect.sync(() => getCachedCommand(commandsDir, commandName)).pipe(Effect.catch(() => Effect.succeed(undefined)))
       if (!cmdFile) return { content: `❌ Command "${commandName}" not found.` }
       const { agent, model: modelStr, mcp, allow, ragflow_dataset, body } = parseFrontmatter(cmdFile)
-      Effect.logInfo("webhook.command", { command: commandName, agent, model: modelStr ?? "default", mcp: JSON.stringify(mcp), allow: JSON.stringify(allow), bodyChars: body.length })
+      yield* Effect.logInfo("webhook.command", { command: commandName, agent, model: modelStr ?? "default", mcp: JSON.stringify(mcp), allow: JSON.stringify(allow), bodyChars: body.length })
 
       // ── 5. Allow check ────────────────────────────────────────────
       if (allow.length > 0) {
@@ -344,10 +344,10 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
           return false
         })
         if (!matched) {
-          Effect.logWarning("webhook.deny", { senderEmail, allow: JSON.stringify(allow) })
+          console.error("webhook.deny", { senderEmail, allow: JSON.stringify(allow) })
           return { content: "❌ Access denied." }
         }
-        Effect.logInfo("webhook.allow", { senderEmail })
+        yield* Effect.logInfo("webhook.allow", { senderEmail })
       }
 
       // ── 6. S3 + RAGFlow upload (forkDetach, фон, не блокирует ответ) ─
@@ -370,7 +370,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
           yield* Effect.tryPromise(async () => {
             const client = getS3(s3cfg.region, s3cfg.endpoint)
             await client.send(new PutObjectCommand({ Bucket: s3cfg.bucket!, Key: key, Body: body, ContentType: mime }))
-            Effect.logInfo("webhook.s3_uploaded", { key, bucket: s3cfg.bucket!, command: commandName, size: body.length })
+            console.error("webhook.s3_uploaded", { key, bucket: s3cfg.bucket!, command: commandName, size: body.length })
           }).pipe(Effect.forkDetach)
         }
         if (ragflow_dataset && fp.bytes && ragflowApi && ragflowToken) {
@@ -381,8 +381,8 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
               headers: { "Content-Type": "application/json", Authorization: `Bearer ${ragflowToken}` },
               body: JSON.stringify({ file_name: fp.filename, text_content: text }),
             })
-            if (!res.ok) { Effect.logWarning("ragflow.upload_fail", { datasetId: ragflow_dataset, filename: fp.filename, status: res.status }) }
-            else { Effect.logInfo("ragflow.upload_ok", { datasetId: ragflow_dataset, filename: fp.filename }) }
+            if (!res.ok) { console.error("ragflow.upload_fail", { datasetId: ragflow_dataset, filename: fp.filename, status: res.status }) }
+            else { console.error("ragflow.upload_ok", { datasetId: ragflow_dataset, filename: fp.filename }) }
           }).pipe(Effect.forkDetach)
         }
       }
@@ -399,7 +399,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
           try { prompt += `\n\n--- ${fp.filename} ---\n${Buffer.from(fp.url.split(",")[1], "base64").toString("utf-8").slice(0, 3000)}` } catch {}
         } else { prompt += `\n\n[File: ${fp.filename} (${fp.mime})]` }
       }
-      Effect.logInfo("webhook.prompt", { text: truncate(prompt, 1000) })
+      yield* Effect.logInfo("webhook.prompt", { text: truncate(prompt, 1000) })
 
       // ── 8. Модель ────────────────────────────────────────────────
       let modelInput: { providerID: string; modelID: string } | undefined
@@ -420,7 +420,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         id: sessionID,
         location: Location.Ref.make({ directory: AbsolutePath.make(PROJECT_ROOT) }),
       }).pipe(Effect.catch(() => Effect.void))
-      Effect.logInfo("webhook.session", { cacheKey, sessionID })
+      yield* Effect.logInfo("webhook.session", { cacheKey, sessionID })
 
       const sessionPrompt = yield* SessionPrompt.Service
       const input: any = { sessionID, agent, parts: [{ type: "text" as const, text: prompt }] }
@@ -430,7 +430,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       // Learn bot service token from first webhook (per-bot S3 config)
       const whToken = payload.token ?? ""
 
-      Effect.logInfo("webhook.prompt_start", { source: sourceName, command: commandName, agent, model: modelStr ?? "default", sessionID, promptLen: prompt.length, files: fileParts.length })
+      yield* Effect.logInfo("webhook.prompt_start", { source: sourceName, command: commandName, agent, model: modelStr ?? "default", sessionID, promptLen: prompt.length, files: fileParts.length })
 
       // Send ack only if bot has MCP tools (complex request may take time)
       const hasTools = Object.keys(mcp).length > 0
@@ -459,7 +459,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       }
 
       const elapsed = Date.now() - startTime
-      Effect.logInfo("webhook.done", { source: sourceName, command: commandName, model: modelStr ?? "default", totalTime: elapsed, text: "acknowledged" })
+      yield* Effect.logInfo("webhook.done", { source: sourceName, command: commandName, model: modelStr ?? "default", totalTime: elapsed, text: "acknowledged" })
       return { content: "✅" }
     })
 
@@ -473,7 +473,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       cachedConfig = null
       cachedCommands.clear()
       const count = yield* Effect.tryPromise(() => syncPromptsFromS3()).pipe(Effect.catch(() => Effect.succeed(0)))
-      Effect.logInfo("webhook.cache_reloaded", { promptsFromS3: count })
+      yield* Effect.logInfo("webhook.cache_reloaded", { promptsFromS3: count })
       return { content: `✅ Cache reloaded. ${count > 0 ? `Restored ${count} prompts from S3.` : ""}`.trim() }
     })
 
