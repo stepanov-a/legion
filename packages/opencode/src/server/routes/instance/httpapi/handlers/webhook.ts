@@ -52,9 +52,9 @@ function getCachedCommand(dir: string, name: string): string | undefined {
 // ── Session cache ───────────────────────────────────────────────
 const sessionCache = new Map<string, string>()
 
-function sessionCacheKey(source: string, stream: string, topic: string, sender: string, botEmail?: string): string {
-  if (stream === "dm") return `${source}:dm:${sender}:${botEmail ?? "default"}`
-  return `${source}:${stream}:${topic}`
+function sessionCacheKey(source: string, stream: string, topic: string, sender: string, commandName: string, botEmail?: string): string {
+  if (stream === "dm") return `${source}:dm:${sender}:${botEmail ?? "default"}:${commandName}`
+  return `${source}:${stream}:${topic}:${commandName}`
 }
 
 function getOrCreateSessionID(key: string): string {
@@ -412,7 +412,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
 
       // ── 9. Immediate acknowledgement + background LLM ──────────────
       const whBotEmail = botEmail ?? payload.bot_email ?? ""
-      const cacheKey = sessionCacheKey(sourceName, stream, topic, sender, whBotEmail)
+      const cacheKey = sessionCacheKey(sourceName, stream, topic, sender, commandName, whBotEmail)
       const sessionIDStr = getOrCreateSessionID(cacheKey)
       const sessionID = SessionV2.ID.descending(sessionIDStr)
       yield* sessions.create({
