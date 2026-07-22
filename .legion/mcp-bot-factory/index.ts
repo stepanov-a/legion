@@ -371,7 +371,7 @@ const tools = [
         prompt: { type: "string", description: "Полный текст промпта команды. Используй $SENDER, $STREAM, $TOPIC, $CONTENT, $SOURCE как переменные" },
         stream: { type: "string", description: "Zulip-канал для routing (например general, admin). * — любой" },
         agent: { type: "string", description: "Агент opencode (general, architect и т.д.)", default: "general" },
-        model: { type: "string", description: "Модель (опционально, например ollama/qwen2.5)", default: "" },
+        model: { type: "string", description: "Модель (например opencode-go/deepseek-v4-flash). Если не указать — будет взята модель бота-создателя.", default: "" },
         allow: { type: "string", description: "Whitelist email'ов через запятую (опционально)", default: "" },
         mcp: { type: "string", description: "MCP-инструменты через запятую (опционально, например ragflow-proxy,zulip)", default: "" },
         ragflow_dataset: { type: "string", description: "RAGFlow dataset ID для фоновой индексации файлов (опционально)", default: "" },
@@ -468,7 +468,8 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
 
       // 1. Создаём .md файл команды
       const frontmatter: Record<string, string> = { name: safeName, description, agent }
-      frontmatter.model = modelStr || "opencode-go/deepseek-v4-flash"
+      if (!modelStr) throw new Error("model is required — укажи модель (например opencode-go/deepseek-v4-flash)")
+      frontmatter.model = modelStr
       if (allow) frontmatter.allow = JSON.stringify(allow.split(",").map((s: string) => s.trim()))
       if (mcpStr || selfUpdate) {
         const mcpObj: Record<string, boolean> = {}

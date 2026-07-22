@@ -266,9 +266,9 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
 
       // ── 2. Конфиг ──────────────────────────────────────────────────
       const config: any = yield* Effect.sync(() => loadConfig()).pipe(Effect.catch(() => Effect.succeed(undefined)))
-      if (!config) return { content: "❌ Config not found." }
+      if (!config) { console.error("webhook.error: config not found", { sourceName }); return { content: "❌ Config not found." } }
       const source = config?.sources?.find((s: any) => s.name === sourceName)
-      if (!source) return { content: `❌ Source "${sourceName}" not configured.` }
+      if (!source) { console.error("webhook.error: source not configured", { sourceName }); return { content: `❌ Source "${sourceName}" not configured.` } }
 
       const botEmail = payload.bot_email ?? ""
       const zulipUrl = process.env.LEGION_ZULIP_URL ?? source.zulip_url
@@ -300,7 +300,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
           return JSON.parse(await res.Body!.transformToString("utf-8"))
         }).pipe(Effect.catch(() => Effect.succeed(undefined as any)))
         if (botCfg?.service_tokens?.length > 0 && !botCfg.service_tokens.includes(receivedToken)) {
-          Effect.logWarning("webhook.token_mismatch", { botEmail, commandName })
+          console.error("webhook.error: token mismatch", { botEmail, commandName })
           return { content: "❌ Invalid token." }
         }
       }
@@ -319,7 +319,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
             const clean = uploadPath.replace(/[)\]>'".,;:!]+$/, "")
             if (!botApiKey) { Effect.logWarning("webhook.download_skip", { path: clean }); return null }
             const res = await fetch(`${zulipUrl}${clean}?api_key=${botApiKey}`, { headers: { "Host": "zulip.local:8443", "User-Agent": "LegionBot/1.0" }, redirect: "follow" })
-            if (!res.ok) { Effect.logWarning("webhook.download_fail", { path: clean, status: res.status }); return null }
+            if (!res.ok) { console.error("webhook.download_fail", { path: clean, status: res.status }); return null }
             const mime = res.headers.get("content-type") ?? "application/octet-stream"
             const bytes = Buffer.from(await res.arrayBuffer())
             Effect.logInfo("webhook.download_ok", { filename: path.basename(clean), mime, size: bytes.length })
@@ -407,8 +407,8 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         const [pid, mid] = modelStr.split("/")
         const provider = yield* Provider.Service
         const found = yield* provider.getModel(ProviderV2.ID.make(pid), ModelV2.ID.make(mid)).pipe(Effect.catch(() => Effect.succeed(undefined as any)))
-        if (found) { modelInput = { providerID: ProviderV2.ID.make(pid), modelID: ModelV2.ID.make(mid) }; Effect.logInfo("webhook.model_resolved", { model: modelStr }) }
-        else { return { content: `❌ Модель "${modelStr}" не найдена. Укажи существующую модель в frontmatter команды.` } }
+        if (found) { modelInput = { providerID: ProviderV2.ID.make(pid), modelID: ModelV2.ID.make(mid) } }
+        else { console.error("webhook.error: model not found", { model: modelStr, command: commandName }); return { content: `❌ Модель "${modelStr}" не найдена. Укажи существующую модель в frontmatter команды.` } }
       }
 
       // ── 9. Immediate acknowledgement + background LLM ──────────────
@@ -464,7 +464,10 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
     })
 
     const ingress = (ctx: { params: { source: string }; payload: unknown }) =>
-      run(ctx).pipe(Effect.catchCause(() => Effect.succeed({ content: "❌ Internal error." } as const)))
+      run(ctx).pipe(Effect.catchCause((cause) => {
+        console.error("webhook.crash:", cause)
+        return Effect.succeed({ content: "❌ Internal error." } as const)
+      }))
 
     const reload = Effect.fn("Webhook.reload")(function* () {
       cachedConfig = null
