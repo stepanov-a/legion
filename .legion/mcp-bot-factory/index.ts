@@ -33,6 +33,7 @@ if (s3Available) {
 }
 
 const LEGION_PAYLOAD_URL = process.env.LEGION_PAYLOAD_URL ?? "http://legion.local:3000/webhook/zulip"
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL ?? "opencode-go/deepseek-v4-flash"
 const LEGION_DIR = path.join(PROJECT_ROOT, ".legion")
 const COMMANDS_DIR = path.join(LEGION_DIR, "command")
 const INTEGRATIONS_PATH = path.join(LEGION_DIR, "integrations.jsonc")
@@ -371,7 +372,7 @@ const tools = [
         prompt: { type: "string", description: "Полный текст промпта команды. Используй $SENDER, $STREAM, $TOPIC, $CONTENT, $SOURCE как переменные" },
         stream: { type: "string", description: "Zulip-канал для routing (например general, admin). * — любой" },
         agent: { type: "string", description: "Агент opencode (general, architect и т.д.)", default: "general" },
-        model: { type: "string", description: "Модель (например opencode-go/deepseek-v4-flash). По умолчанию opencode-go/deepseek-v4-flash.", default: "" },
+        model: { type: "string", description: "Модель (например opencode-go/deepseek-v4-flash). По умолчанию из DEFAULT_MODEL env.", default: "" },
         allow: { type: "string", description: "Whitelist email'ов через запятую (опционально)", default: "" },
         mcp: { type: "string", description: "MCP-инструменты через запятую (опционально, например ragflow-proxy,zulip)", default: "" },
         ragflow_dataset: { type: "string", description: "RAGFlow dataset ID для фоновой индексации файлов (опционально)", default: "" },
@@ -468,7 +469,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
 
       // 1. Создаём .md файл команды
       const frontmatter: Record<string, string> = { name: safeName, description, agent }
-      frontmatter.model = modelStr || "opencode-go/deepseek-v4-flash"
+      frontmatter.model = modelStr || DEFAULT_MODEL
       if (allow) frontmatter.allow = JSON.stringify(allow.split(",").map((s: string) => s.trim()))
       if (mcpStr || selfUpdate) {
         const mcpObj: Record<string, boolean> = {}
