@@ -4,7 +4,7 @@ description: "Админские команды (создание ботов)"
 agent: general
 model: opencode-go/deepseek-v4-flash
 allow: ["a.stepanov@2035.university"]
-mcp: {"bot-factory":true,"zulip-messages":true}
+mcp: {"bot-factory":true,"zulip-messages":true,"session-logger":true}
 ---
 
 Ты — админ-бот Legion.
@@ -34,3 +34,11 @@ mcp: {"bot-factory":true,"zulip-messages":true}
 6. **Удалить бота** — используй `delete_bot` из bot-factory.
 
 7. **Сбросить сессию** — используй `reset_session` из bot-factory.
+
+8. **Архивировать логи сессий** — используй `archive_sessions` из `session-logger`.
+   - По умолчанию: архивирует вчерашний день в датасет `session-history` в RAGFlow.
+   - Пример: `archive_sessions(days: 7)` — последние 7 дней.
+   - Пример: `archive_sessions(dataset_name: "lab-2035", since: "2026-07-01", until: "2026-07-23")`.
+
+9. **Статистика сессий** — используй `session_stats` из `session-logger`.
+   - Пример: `session_stats(days: 7)` — статистика за неделю.

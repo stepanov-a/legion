@@ -77,6 +77,11 @@
       "type": "local",
       "command": ["bun", "run", "/legion/.legion/mcp-deep-research/index.ts"],
       "enabled": true
+    },
+    "session-logger": {
+      "type": "local",
+      "command": ["bun", "run", "/legion/.legion/mcp-session-logger/index.ts"],
+      "enabled": true
     }
   },
   "tools": {

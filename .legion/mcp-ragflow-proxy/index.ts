@@ -343,7 +343,16 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       let res: Response
 
       if (tmp_path) {
-        const fileBuffer = fs.readFileSync(tmp_path as string)
+        let fileBuffer: Buffer
+        try {
+          fileBuffer = fs.readFileSync(tmp_path as string)
+        } catch (e: any) {
+          const msg = e.message ?? String(e)
+          if (msg.includes("EACCES") || msg.includes("permission") || msg.includes("denied")) {
+            throw new Error(`Cannot read file from ${tmp_path}. Add "external_directory": "allow" to the permission section in .opencode/opencode.jsonc or configure it in opencode.json to allow access to /tmp/`)
+          }
+          throw new Error(`Failed to read temporary file ${tmp_path}: ${msg}`)
+        }
         const form = new FormData()
         form.append("file", new Blob([fileBuffer]), file_name as string)
         if (file_url) form.append("url", file_url as string)

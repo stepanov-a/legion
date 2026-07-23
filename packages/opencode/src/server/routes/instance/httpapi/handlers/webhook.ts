@@ -22,6 +22,18 @@ import { S3Client, GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3
 const PROJECT_ROOT = process.env.LEGION_PROJECT_DIR ?? process.cwd()
 const LEGION_DIR = path.join(PROJECT_ROOT, ".legion")
 const ROUTING_PATH = path.join(LEGION_DIR, "integrations.jsonc")
+const SESSION_LOG_DIR = path.join(LEGION_DIR, "logs", "sessions")
+
+function logSessionEvent(command: string, sessionID: string, event: string, extra?: Record<string, unknown>): void {
+  try {
+    const now = new Date()
+    const dateStr = now.toISOString().slice(0, 10)
+    const dir = SESSION_LOG_DIR
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    const line = JSON.stringify({ t: now.toISOString(), s: sessionID, cmd: command, e: event, ...extra }) + "\n"
+    fs.appendFileSync(path.join(dir, `${dateStr}.jsonl`), line)
+  } catch {}
+}
 
 // ── Кэш конфигов ────────────────────────────────────────────────
 let cachedConfig: any = null
@@ -450,6 +462,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
 
       // LLM processing — response sent via Zulip API when done
       const llmStartTime = Date.now()
+      yield* Effect.sync(() => logSessionEvent(commandName, sessionIDStr, "prompt_start", { len: prompt.length, mcp: Object.keys(mcp).length }))
       yield* Effect.logInfo("webhook.llm_start", { command: commandName, model: modelStr ?? "default", timeout: 120, mcpCount: Object.keys(mcp).length })
 
       const LLM_TIMEOUT = "120 seconds"
@@ -462,7 +475,9 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         }),
       )
 
-      yield* Effect.logInfo("webhook.llm_done", { command: commandName, elapsed: Date.now() - llmStartTime, hasResult: !!result })
+      const llmElapsed = Date.now() - llmStartTime
+      yield* Effect.sync(() => logSessionEvent(commandName, sessionIDStr, "llm_done", { ms: llmElapsed, hasResult: !!result }))
+      yield* Effect.logInfo("webhook.llm_done", { command: commandName, elapsed: llmElapsed, hasResult: !!result })
 
       if (result) {
         const responseText = (result.parts as any[]).filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n").trim()
@@ -480,6 +495,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       }
 
       const elapsed = Date.now() - startTime
+      yield* Effect.sync(() => logSessionEvent(commandName, sessionIDStr, "done", { ms: elapsed }))
       yield* Effect.logInfo("webhook.done", { source: sourceName, command: commandName, model: modelStr ?? "default", totalTime: elapsed, text: "acknowledged" })
       return { content: "✅" }
     })
