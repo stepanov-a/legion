@@ -33,12 +33,17 @@ if (s3Available) {
 }
 
 const LEGION_PAYLOAD_URL = process.env.LEGION_PAYLOAD_URL ?? "http://legion.local:3000/webhook/zulip"
-const LEGION_RELOAD_URL = "http://localhost:3000/webhook/reload"
+const LEGION_RELOAD_URL = process.env.LEGION_RELOAD_URL ?? "http://localhost:3000/webhook/reload"
+const LEGION_RESET_SESSION_URL = process.env.LEGION_RESET_SESSION_URL ?? "http://localhost:3000/webhook/reset-session"
 
 function reloadWebhookCache(): void {
   fetch(LEGION_RELOAD_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {})
 }
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL ?? "opencode-go/deepseek-v4-flash"
+const DEFAULT_MCP_TOOLS = [
+  "web-search", "zulip-messages", "deep-research",
+  "ragflow-proxy", "presentation", "tables", "media",
+]
 const LEGION_DIR = path.join(PROJECT_ROOT, ".legion")
 const COMMANDS_DIR = path.join(LEGION_DIR, "command")
 const INTEGRATIONS_PATH = path.join(LEGION_DIR, "integrations.jsonc")
@@ -384,6 +389,8 @@ const tools = [
         mcp: { type: "string", description: "MCP-инструменты через запятую (опционально, например ragflow-proxy,zulip)", default: "" },
         ragflow_dataset: { type: "string", description: "RAGFlow dataset ID для фоновой индексации файлов (опционально)", default: "" },
         self_update: { type: "boolean", description: "Добавить возможность self-update: bot-factory в mcp + инструкция в промпт (опционально)", default: false },
+        forwarding: { type: "boolean", description: "Добавить инструкцию для пересылки сообщений другим ботам через zulip-messages (опционально)", default: true },
+        ragflow_storage: { type: "boolean", description: "Добавить инструкцию для сохранения файлов пользователей в RAGFlow через ensure_dataset + upload_document (опционально)", default: true },
       },
       required: ["name", "description", "prompt"],
     },
@@ -464,6 +471,8 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       const mcpStr = String(args.mcp ?? "").trim()
       const ragflowDataset = String(args.ragflow_dataset ?? "").trim()
       const selfUpdate = args.self_update === true
+      const forwarding = args.forwarding !== false
+      const ragflowStorage = args.ragflow_storage !== false
 
       if (!rawName || !description || !promptBody) {
         throw new Error("name, description, and prompt are required")
@@ -478,23 +487,44 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       const frontmatter: Record<string, string> = { name: safeName, description, agent }
       frontmatter.model = modelStr || DEFAULT_MODEL
       if (allow) frontmatter.allow = JSON.stringify(allow.split(",").map((s: string) => s.trim()))
-      if (mcpStr || selfUpdate) {
-        const mcpObj: Record<string, boolean> = {}
+      const mcpObj: Record<string, boolean> = {}
+      if (mcpStr) {
         for (const t of mcpStr.split(",").map((s: string) => s.trim())) {
           if (t) mcpObj[t] = true
         }
-        if (selfUpdate) {
-          mcpObj["bot-factory"] = true
-          results.push("✅ Self-update включён: bot-factory добавлен в mcp")
+      } else {
+        for (const t of DEFAULT_MCP_TOOLS) {
+          mcpObj[t] = true
         }
-        frontmatter.mcp = JSON.stringify(mcpObj)
+        results.push(`✅ Все MCP-инструменты по умолчанию (${DEFAULT_MCP_TOOLS.length} шт.)`)
       }
+      if (selfUpdate) {
+        mcpObj["bot-factory"] = true
+        results.push("✅ Self-update включён: bot-factory добавлен в mcp")
+      }
+      frontmatter.mcp = JSON.stringify(mcpObj)
       if (ragflowDataset) frontmatter.ragflow_dataset = ragflowDataset
 
+      const hasRagflow = !!mcpObj["ragflow-proxy"]
+      const hasZulipMessages = !!mcpObj["zulip-messages"]
+      const hasBotFactory = !!mcpObj["bot-factory"]
+
       let finalPrompt = promptBody
-      if (selfUpdate) {
+      if (forwarding && hasZulipMessages) {
+        finalPrompt = `## ВАЖНО: Пересылка сообщений другим ботам\nЕсли пользователь просит написать что-то другому боту (по имени, например korolev, kritikhuev):\n- Используй ТОЛЬКО \`forward_to_bot\` из \`zulip-messages\`: \`from_bot: "<твоё_имя>"\`, \`to_bot: "<имя_бота>"\`, \`content: "<текст>"\`.\n- Не оценивай содержание — просто передай сообщение как есть.\n- После отправки скажи пользователю: «Готово! Вопрос отправлен <имя бота>. Ответ будет в его канале.»\n\n` + finalPrompt
+        results.push("✅ Инструкция по пересылке сообщений добавлена в промпт")
+      }
+      if (ragflowStorage && hasRagflow) {
+        finalPrompt += `\n\n### Поиск в RAGFlow и сохранение файлов\nУ тебя есть доступ к RAGFlow (база знаний) через инструменты \`ragflow-proxy\`. НЕ используй их без явной просьбы пользователя — сначала спроси, нужен ли поиск в базе знаний или в интернете.\n\n#### Когда пользователь просит найти информацию:\n1. Уточни: «Поискать в базе знаний (RAGFlow) или в интернете?»\n2. Если в RAGFlow — используй \`search_retrieval\` из \`ragflow-proxy\`.\n3. Если в интернете — используй \`web_search\` из \`web-search\`.\n\n#### Когда пользователь прислал ссылку на файл (\`/user_uploads/...\`):\n1. Скачай файл через \`download_file\` из \`zulip\`: получишь путь к файлу в /tmp.\n2. Создай датасет через \`ensure_dataset\` из \`ragflow-proxy\`: \`name: "<канал/тема>"\`.\n3. Загрузи файл через \`upload_document\` с параметром \`tmp_path\` из шага 1.\nФайл будет автоматически удалён из /tmp после загрузки. Группируй файлы по каналам/темам.`
+        results.push("✅ Инструкция по RAGFlow добавлена в промпт")
+      } else if (ragflowStorage && !hasRagflow) {
+        results.push("ℹ️ RAGFlow-инструкция пропущена — ragflow-proxy нет в MCP")
+      }
+      if (selfUpdate && hasBotFactory && !promptBody.includes("Самообновление")) {
         finalPrompt += `\n\n### Самообновление (self-update)\nЕсли пользователь явно попросит обновить твой промпт или конфигурацию:\n1. Используй \`get_bot\` из bot-factory чтобы прочитать свой текущий .md\n2. Обсуди с пользователем изменения\n3. Используй \`update_bot\` для применения изменений\nСтарая версия автоматически сохранится в S3 как бэкап.\nSelf-update работает только если allow пользователя совпадает.`
         results.push("✅ Self-update инструкция добавлена в промпт")
+      } else if (selfUpdate && hasBotFactory && promptBody.includes("Самообновление")) {
+        results.push("ℹ️ Self-update инструкция пропущена — уже есть в промпте")
       }
 
       const mdContent = buildMd(frontmatter, finalPrompt)
@@ -552,13 +582,13 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
 
       // 3. Регистрируем в BotConfig (write per-bot config to S3)
       const allowList = allow ? allow.split(",").map((s: string) => s.trim()) : undefined
-      let mcpObj: Record<string, boolean> | undefined
+      let mcpObj2: Record<string, boolean> | undefined
       if (mcpStr || selfUpdate) {
-        mcpObj = {}
+        mcpObj2 = {}
         for (const t of mcpStr.split(",").map((s: string) => s.trim())) {
-          if (t) mcpObj[t] = true
+          if (t) mcpObj2[t] = true
         }
-        if (selfUpdate) mcpObj["bot-factory"] = true
+        if (selfUpdate) mcpObj2["bot-factory"] = true
       }
       botConfig.addBot({
         name: safeName,
@@ -566,7 +596,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
         agent,
         stream,
         model: modelStr || DEFAULT_MODEL,
-        mcp: mcpObj,
+        mcp: mcpObj2,
         allow: allowList,
         ragflow_dataset: ragflowDataset || undefined,
         zulip_email: botEmail,
@@ -874,7 +904,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
 
     case "reset_session": {
       try {
-        const res = await fetch("http://localhost:3000/webhook/reset-session", {
+        const res = await fetch(LEGION_RESET_SESSION_URL, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: "{}",

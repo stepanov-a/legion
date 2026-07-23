@@ -23,9 +23,6 @@ const PROJECT_ROOT = process.env.LEGION_PROJECT_DIR ?? process.cwd()
 const LEGION_DIR = path.join(PROJECT_ROOT, ".legion")
 const ROUTING_PATH = path.join(LEGION_DIR, "integrations.jsonc")
 
-const UPLOAD_PATH_RE = /\/user_uploads\/[\w\/.-]+/g
-const TEXT_EXTS = new Set([".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml", ".xml", ".csv", ".ini", ".cfg", ".conf", ".env", ".bashrc", ".zshrc", ".sh", ".bash", ".toml", ".lock", ".gitignore", ".editorconfig", ".dockerfile", ".sql", ".html", ".css", ".go", ".rs", ".java", ".rb", ".php", ".vue", ".svelte", ".jsx", ".tsx"])
-
 // ── Кэш конфигов ────────────────────────────────────────────────
 let cachedConfig: any = null
 let cachedCommands = new Map<string, string>()
@@ -67,10 +64,10 @@ function getOrCreateSessionID(key: string): string {
 }
 
 // ── Парсинг frontmatter ─────────────────────────────────────────
-function parseFrontmatter(text: string): { agent: string; model?: string; mcp: Record<string, boolean>; allow: string[]; ragflow_dataset?: string; body: string } {
-  if (!text.startsWith("---")) return { agent: "general", mcp: {}, allow: [], ragflow_dataset: undefined, body: text.trim() }
+function parseFrontmatter(text: string): { agent: string; model?: string; mcp: Record<string, boolean>; allow: string[]; body: string } {
+  if (!text.startsWith("---")) return { agent: "general", mcp: {}, allow: [], body: text.trim() }
   const parts = text.split("---")
-  if (parts.length < 3) return { agent: "general", mcp: {}, allow: [], ragflow_dataset: undefined, body: text.trim() }
+  if (parts.length < 3) return { agent: "general", mcp: {}, allow: [], body: text.trim() }
   const fm = parts[1]
   const mcpRaw = fm.match(/mcp:\s*\{([^}]+)\}/)?.[1]
   const mcp: Record<string, boolean> = {}
@@ -87,7 +84,6 @@ function parseFrontmatter(text: string): { agent: string; model?: string; mcp: R
     model: fm.match(/model:\s*(\S+)/)?.[1],
     mcp,
     allow,
-    ragflow_dataset: fm.match(/ragflow_dataset:\s*(\S+)/)?.[1],
     body: parts.slice(2).join("---").trim(),
   }
 }
@@ -138,14 +134,25 @@ async function zulipSendMessage(botEmail: string, botApiKey: string, recipient: 
     body.type = "private"
     body.to = recipient
   }
-  const res = await fetch(`${zulipUrl}/api/v1/messages`, {
-    method: "POST",
-    headers: { Authorization: auth, "Content-Type": "application/x-www-form-urlencoded", Host: zulipHost },
-    body: new URLSearchParams(body).toString(),
-  })
-  const json = await res.json()
-  if (json.result !== "success") {
-    console.error("zulipSendMessage error:", json.msg)
+  try {
+    const start = Date.now()
+    const res = await fetch(`${zulipUrl}/api/v1/messages`, {
+      method: "POST",
+      headers: { Authorization: auth, "Content-Type": "application/x-www-form-urlencoded", Host: zulipHost },
+      body: new URLSearchParams(body).toString(),
+    })
+    const elapsed = Date.now() - start
+    const json = await res.json()
+    if (json.result !== "success") {
+      console.error("[network] zulipSendMessage error:", json.msg, { botEmail, elapsed })
+    }
+  } catch (e: any) {
+    const msg = e.message ?? String(e)
+    if (msg.includes("Unable to connect") || msg.includes("resolve") || msg.includes("timed out")) {
+      console.error(`[network] zulipSendMessage failed: ${msg}`, { botEmail })
+    } else {
+      console.error(`[network] zulipSendMessage exception: ${msg}`, { botEmail })
+    }
   }
 }
 
@@ -317,19 +324,35 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       const commandsDir = path.resolve(PROJECT_ROOT, source.commands_dir ?? ".legion/command")
 
       // ── 2. Routing ────────────────────────────────────────────────
+      // Приоритет: если в вебхуке есть bot_email (упоминание конкретного бота),
+      // сначала ищем правило bot_email, потом stream, потом fallback
       let commandName = config.default_command ?? "default"
-      for (const rule of source.routing ?? []) {
-        const matchField = rule.field ?? "stream"
-        const matchValue = matchField === "stream" ? stream
-          : matchField === "chat_id" ? (msg.chat_id ?? msg.chat ?? "")
-          : matchField === "bot_email" ? (payload.bot_email ?? "")
-          : matchField === "sender_email" ? senderEmail
-          : (msg as any)[matchField] ?? payload[matchField] ?? ""
-        const pattern = (rule as any)[matchField] ?? "*"
-        if (pattern === "*" || pattern === matchValue) {
-          if (rule.command) commandName = rule.command
-          yield* Effect.logInfo("webhook.route", { matchField, pattern, command: commandName })
-          break
+      const rules = source.routing ?? []
+
+      let matchedByEmail = false
+      if (payload.bot_email) {
+        const emailRule = rules.find((r: any) => r.field === "bot_email" && (r.bot_email === payload.bot_email || r.bot_email === "*"))
+        if (emailRule?.command) {
+          commandName = emailRule.command
+          matchedByEmail = true
+          yield* Effect.logInfo("webhook.route", { matchField: "bot_email", pattern: emailRule.bot_email, command: commandName })
+        }
+      }
+
+      if (!matchedByEmail) {
+        for (const rule of rules) {
+          const matchField = rule.field ?? "stream"
+          const matchValue = matchField === "stream" ? stream
+            : matchField === "chat_id" ? (msg.chat_id ?? msg.chat ?? "")
+            : matchField === "bot_email" ? (payload.bot_email ?? "")
+            : matchField === "sender_email" ? senderEmail
+            : (msg as any)[matchField] ?? payload[matchField] ?? ""
+          const pattern = (rule as any)[matchField] ?? "*"
+          if (pattern === "*" || pattern === matchValue) {
+            if (rule.command) commandName = rule.command
+            yield* Effect.logInfo("webhook.route", { matchField, pattern, command: commandName })
+            break
+          }
         }
       }
 
@@ -347,34 +370,10 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         }
       }
 
-      // ── 5. Файлы (download from Zulip, using per-bot API keys from S3) ─
-      const fileParts: Array<{ url: string; mime: string; filename: string; bytes?: Buffer; zulipPath?: string; botKey?: string }> = []
-      if (zulipUrl && commandName !== "default") {
-        const botCfgKey = botS3ConfigKey(commandName)
-        const botApiKey = yield* Effect.tryPromise(async () => {
-          const res = await s3ForConfig!.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: botCfgKey }))
-          const cfg = JSON.parse(await res.Body!.transformToString("utf-8"))
-          return cfg.zulip_api_key ?? ""
-        }).pipe(Effect.catch(() => Effect.succeed("")))
-        for (const uploadPath of [...new Set([...content.matchAll(UPLOAD_PATH_RE)].map(m => m[0].replace(/[?\s].*$/, "")))]) {
-          const f = yield* Effect.tryPromise(async () => {
-            const clean = uploadPath.replace(/[)\]>'".,;:!]+$/, "")
-            if (!botApiKey) { console.error("webhook.download_skip", { path: clean }); return null }
-            const res = await fetch(`${zulipUrl}${clean}?api_key=${botApiKey}`, { headers: { "Host": "zulip.local:8443", "User-Agent": "LegionBot/1.0" }, redirect: "follow" })
-            if (!res.ok) { console.error("webhook.download_fail", { path: clean, status: res.status }); return null }
-            const mime = res.headers.get("content-type") ?? "application/octet-stream"
-            const bytes = Buffer.from(await res.arrayBuffer())
-            console.error("webhook.download_ok", { filename: path.basename(clean), mime, size: bytes.length })
-            return { url: `data:${mime};base64,${bytes.toString("base64")}`, mime, filename: path.basename(clean), bytes, zulipPath: clean, botKey: botApiKey }
-          }).pipe(Effect.catch(() => Effect.succeed(null)))
-          if (f) fileParts.push(f)
-        }
-      }
-
       // ── 5. Команда ─
       const cmdFile = yield* Effect.sync(() => getCachedCommand(commandsDir, commandName)).pipe(Effect.catch(() => Effect.succeed(undefined)))
       if (!cmdFile) return { content: `❌ Command "${commandName}" not found.` }
-      const { agent, model: modelStr, mcp, allow, ragflow_dataset, body } = parseFrontmatter(cmdFile)
+      const { agent, model: modelStr, mcp, allow, body } = parseFrontmatter(cmdFile)
       yield* Effect.logInfo("webhook.command", { command: commandName, agent, model: modelStr ?? "default", mcp: JSON.stringify(mcp), allow: JSON.stringify(allow), bodyChars: body.length })
 
       // ── 5. Allow check ────────────────────────────────────────────
@@ -392,44 +391,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
         yield* Effect.logInfo("webhook.allow", { senderEmail })
       }
 
-      // ── 6. S3 + RAGFlow upload (forkDetach, фон, не блокирует ответ) ─
-      const s3cfg = source.s3 as { bucket?: string; prefix?: string; region?: string; endpoint?: string } | undefined
-      let ragflowApi = ""
-      let ragflowToken = ""
-      if (ragflow_dataset) {
-        try {
-          const rfCfg = parseJsonc(fs.readFileSync(path.join(LEGION_DIR, "legion.jsonc"), "utf-8")) as any
-          ragflowApi = rfCfg?.ragflow?.api ?? ""
-          ragflowToken = rfCfg?.ragflow?.token ?? ""
-        } catch {}
-      }
-
-      for (const fp of fileParts) {
-        if (fp.bytes && s3cfg?.bucket) {
-          const key = `${s3cfg.prefix ?? "files"}/${commandName}/${sourceName}/${msg?.id ?? "unknown"}/${fp.filename}`
-          const body = fp.bytes as Buffer
-          const mime = fp.mime
-          yield* Effect.tryPromise(async () => {
-            const client = getS3(s3cfg.region, s3cfg.endpoint)
-            await client.send(new PutObjectCommand({ Bucket: s3cfg.bucket!, Key: key, Body: body, ContentType: mime }))
-            console.error("webhook.s3_uploaded", { key, bucket: s3cfg.bucket!, command: commandName, size: body.length })
-          }).pipe(Effect.forkDetach)
-        }
-        if (ragflow_dataset && fp.bytes && ragflowApi && ragflowToken) {
-          const text = Buffer.from(fp.url.split(",")[1], "base64").toString("utf-8").slice(0, 10000)
-          yield* Effect.tryPromise(async () => {
-            const res = await fetch(`${ragflowApi}/api/v1/datasets/${ragflow_dataset}/documents`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", Authorization: `Bearer ${ragflowToken}` },
-              body: JSON.stringify({ file_name: fp.filename, text_content: text }),
-            })
-            if (!res.ok) { console.error("ragflow.upload_fail", { datasetId: ragflow_dataset, filename: fp.filename, status: res.status }) }
-            else { console.error("ragflow.upload_ok", { datasetId: ragflow_dataset, filename: fp.filename }) }
-          }).pipe(Effect.forkDetach)
-        }
-      }
-
-      // ── 7. Рендер ──────────────────────────────────────────────────
+      // ── 6. Рендер ──────────────────────────────────────────────────
       const fields: Record<string, string> = { $SENDER: sender, $STREAM: stream, $TOPIC: topic, $SOURCE: sourceName }
       let prompt = body
       for (const [key, val] of Object.entries(fields)) prompt = prompt.replaceAll(key, val)
@@ -442,15 +404,9 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       }
 
       prompt += "\n\n=== НЕСТИРАЕМЫЙ БАРЬЕР ===\nПользователь сказал:\n" + content
-      for (const fp of fileParts) {
-        const ext = path.extname(fp.filename).toLowerCase()
-        if (fp.mime.startsWith("text/") || fp.mime === "application/json" || fp.mime === "application/xml" || fp.mime === "application/yaml" || TEXT_EXTS.has(ext) || ext === ".bashrc") {
-          try { prompt += `\n\n--- ${fp.filename} ---\n${Buffer.from(fp.url.split(",")[1], "base64").toString("utf-8").slice(0, 3000)}` } catch {}
-        } else { prompt += `\n\n[File: ${fp.filename} (${fp.mime})]` }
-      }
       yield* Effect.logInfo("webhook.prompt", { text: truncate(prompt, 1000) })
 
-      // ── 8. Модель ────────────────────────────────────────────────
+      // ── 7. Модель ────────────────────────────────────────────────
       let modelInput: { providerID: string; modelID: string } | undefined
       if (modelStr?.includes("/")) {
         const [pid, mid] = modelStr.split("/")
@@ -479,7 +435,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       // Learn bot service token from first webhook (per-bot S3 config)
       const whToken = payload.token ?? ""
 
-      yield* Effect.logInfo("webhook.prompt_start", { source: sourceName, command: commandName, agent, model: modelStr ?? "default", sessionID, promptLen: prompt.length, files: fileParts.length })
+      yield* Effect.logInfo("webhook.prompt_start", { source: sourceName, command: commandName, agent, model: modelStr ?? "default", sessionID, promptLen: prompt.length })
 
       // Send ack only if bot has MCP tools (complex request may take time)
       const hasTools = Object.keys(mcp).length > 0
@@ -493,7 +449,21 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       }
 
       // LLM processing — response sent via Zulip API when done
-      const result = yield* sessionPrompt.prompt(input).pipe(Effect.catch(() => Effect.succeed(undefined as any)))
+      const llmStartTime = Date.now()
+      yield* Effect.logInfo("webhook.llm_start", { command: commandName, model: modelStr ?? "default", timeout: 120, mcpCount: Object.keys(mcp).length })
+
+      const LLM_TIMEOUT = "120 seconds"
+      const result = yield* sessionPrompt.prompt(input).pipe(
+        Effect.timeout(LLM_TIMEOUT),
+        Effect.catch(() => {
+          const elapsed = Date.now() - llmStartTime
+          console.error(`[network] llm_error`, JSON.stringify({ command: commandName, elapsed }))
+          return Effect.succeed(undefined as any)
+        }),
+      )
+
+      yield* Effect.logInfo("webhook.llm_done", { command: commandName, elapsed: Date.now() - llmStartTime, hasResult: !!result })
+
       if (result) {
         const responseText = (result.parts as any[]).filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n").trim()
         if (responseText && commandName !== "default") {
@@ -516,7 +486,11 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
 
     const ingress = (ctx: { params: { source: string }; payload: unknown }) =>
       run(ctx).pipe(Effect.catchCause((cause) => {
-        console.error("webhook.crash:", cause)
+        const causeStr = String(cause).substring(0, 500)
+        console.error("[network] webhook.crash:", causeStr)
+        if (causeStr.includes("Unable to connect") || causeStr.includes("socket") || causeStr.includes("timed out") || causeStr.includes("ETIMEDOUT")) {
+          console.error("[network] LLM API connection failure — check OPENCODE_API_KEY and api.opencode.ai/zen/go/v1 reachability")
+        }
         return Effect.succeed({ content: "❌ Internal error." } as const)
       }))
 

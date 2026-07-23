@@ -1,10 +1,14 @@
 #!/usr/bin/env bun
+import * as crypto from "crypto"
+import * as path from "path"
+import * as fs from "fs"
 const ZULIP_URL = process.env.ZULIP_URL
 if (!ZULIP_URL) { console.error("ZULIP_URL is required"); process.exit(1) }
 const ZULIP_EMAIL = process.env.ZULIP_EMAIL
 if (!ZULIP_EMAIL) { console.error("ZULIP_EMAIL is required"); process.exit(1) }
 const ZULIP_API_KEY = process.env.ZULIP_API_KEY
 if (!ZULIP_API_KEY) { console.error("ZULIP_API_KEY is required"); process.exit(1) }
+const ZULIP_HOST = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
 
 const authHeader = "Basic " + Buffer.from(`${ZULIP_EMAIL}:${ZULIP_API_KEY}`).toString("base64")
 
@@ -14,6 +18,7 @@ async function zulipFetch(path: string, init: RequestInit = {}): Promise<any> {
     headers: {
       Authorization: authHeader,
       "Content-Type": "application/x-www-form-urlencoded",
+      Host: ZULIP_HOST,
       ...(init.headers as Record<string, string>),
     },
   })
@@ -48,7 +53,35 @@ const respond = (id: number | string | null, result?: unknown, error?: unknown) 
 
 const log = (msg: string) => process.stderr.write(msg + "\n")
 
+async function zulipDownload(urlPath: string): Promise<{ tmpPath: string; mime: string; filename: string; size: number }> {
+  const clean = urlPath.replace(/[)\]>'".,;:!]+$/, "")
+  const res = await fetch(`${ZULIP_URL}${clean}?api_key=${ZULIP_API_KEY}`, {
+    headers: { Host: ZULIP_HOST, "User-Agent": "LegionBot/1.0" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(30000),
+  })
+  if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`)
+  const mime = res.headers.get("content-type") ?? "application/octet-stream"
+  const buffer = Buffer.from(await res.arrayBuffer())
+  const hash = crypto.createHash("md5").update(clean).digest("hex").slice(0, 8)
+  const baseName = path.basename(clean)
+  const tmpPath = `/tmp/legion_upload_${hash}_${baseName}`
+  fs.writeFileSync(tmpPath, buffer)
+  return { tmpPath, mime, filename: baseName, size: buffer.length }
+}
+
 const tools = [
+  {
+    name: "download_file",
+    description: "Download a file from Zulip by its URL path (e.g. /user_uploads/.../file.pdf). Saves to /tmp and returns file metadata. The tmp_path can be passed to ragflow-proxy upload_document for indexing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "File URL path from Zulip message (e.g. /user_uploads/12/abc123/report.pdf)" },
+      },
+      required: ["url"],
+    },
+  },
   {
     name: "send_message",
     description: "Send a message to a Zulip stream or direct conversation",
@@ -163,6 +196,13 @@ const tools = [
 
 async function handleToolCall(name: string, args: Record<string, unknown>): Promise<{ content: Array<{ type: string; text: string }> }> {
   switch (name) {
+    case "download_file": {
+      const url = String(args.url ?? "")
+      if (!url) throw new Error("url is required")
+      const result = await zulipDownload(url)
+      return { content: [{ type: "text", text: `✅ Downloaded: ${result.filename} (${result.size} bytes, ${result.mime})\nTmp path: ${result.tmpPath}` }] }
+    }
+
     // ── send_message ──────────────────────────────────────────────────
     case "send_message": {
       const to = String(args.to ?? "")

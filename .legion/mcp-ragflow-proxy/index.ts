@@ -1,7 +1,10 @@
 #!/usr/bin/env bun
-const RAGFLOW_API = process.env.RAGFLOW_API ?? "http://127.0.0.1:9380"
-const TOKEN = process.env.RAGFLOW_TOKEN
-if (!TOKEN) { console.error("RAGFLOW_TOKEN is required"); process.exit(1) }
+import * as fs from "fs"
+const RAGFLOW_API = process.env.RAGFLOW_API ?? "http://172.18.0.1:59380"
+const RAGFLOW_TOKEN = process.env.RAGFLOW_TOKEN
+const log = (msg: string) => process.stderr.write(msg + "\n")
+if (!RAGFLOW_TOKEN) log("⚠️ RAGFLOW_TOKEN not set — RAGFlow tools will return empty results")
+const hasRagflow = !!RAGFLOW_API && !!RAGFLOW_TOKEN
 
 // LLM provider config (for build_cards)
 const LLM_PROVIDER = process.env.LLM_PROVIDER ?? "ollama"
@@ -9,14 +12,6 @@ const LLM_BASE_URL = process.env.LLM_BASE_URL ?? "http://localhost:11434"
 const LLM_MODEL = process.env.LLM_MODEL ?? "hf.co/yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF:Q8_0"
 const LLM_API_KEY = process.env.LLM_API_KEY ?? ""
 
-const api = (path: string, init?: RequestInit) =>
-  fetch(`${RAGFLOW_API}${path}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json", ...init?.headers },
-  })
-
-// MCP protocol helpers
-let messageId = 0
 const respond = (id: number | string | null, result?: unknown, error?: unknown) => {
   const msg: Record<string, unknown> = { jsonrpc: "2.0" }
   if (id !== null) msg.id = id
@@ -25,7 +20,103 @@ const respond = (id: number | string | null, result?: unknown, error?: unknown) 
   process.stdout.write(JSON.stringify(msg) + "\n")
 }
 
-const log = (msg: string) => process.stderr.write(msg + "\n")
+class RagflowError extends Error {
+  constructor(
+    message: string,
+    public readonly type: "network" | "auth" | "permission" | "api" | "timeout" | "parse",
+    public readonly status?: number,
+    public readonly code?: number,
+    public readonly detail?: string,
+  ) {
+    super(message)
+    this.name = "RagflowError"
+  }
+}
+
+function authLog(ctx: string, info: string): void {
+  log(`[ragflow] ${ctx}: ${info}`)
+}
+
+async function apiCall(path: string, init?: RequestInit): Promise<any> {
+  const url = `${RAGFLOW_API}${path}`
+  authLog("request", `${init?.method ?? "GET"} ${path}`)
+
+  let res: Response
+  try {
+    res = await fetch(url, {
+      ...init,
+      headers: { Authorization: `Bearer ${RAGFLOW_TOKEN}`, "Content-Type": "application/json", ...init?.headers },
+      signal: AbortSignal.timeout(15000),
+    })
+  } catch (e: any) {
+    const msg = e.message ?? String(e)
+    if (msg.includes("timed out") || msg.includes("Timeout") || msg.includes("Abort")) {
+      authLog("timeout", `${path}: ${msg}`)
+      throw new RagflowError(`RAGFlow timeout after 15s — server may be overloaded or unavailable`, "timeout", undefined, undefined, msg)
+    }
+    if (msg.includes("Unable to connect") || msg.includes("refused") || msg.includes("resolve")) {
+      authLog("network", `${path}: ${msg}`)
+      throw new RagflowError(`RAGFlow is unavailable (${RAGFLOW_API}) — check that the service is running`, "network", undefined, undefined, msg)
+    }
+    authLog("network", `${path}: ${msg}`)
+    throw new RagflowError(`RAGFlow network error: ${msg}`, "network", undefined, undefined, msg)
+  }
+
+  // Check HTTP status
+  if (res.status === 401 || res.status === 403) {
+    const text = await res.text().catch(() => "")
+    authLog("auth", `${path}: HTTP ${res.status} ${text.substring(0, 200)}`)
+    if (res.status === 401) {
+      throw new RagflowError(`RAGFlow auth error (401) — check RAGFLOW_TOKEN`, "auth", 401, undefined, text)
+    }
+    throw new RagflowError(`RAGFlow permission denied (${res.status}) — token may not have access`, "permission", res.status, undefined, text)
+  }
+
+  if (res.status >= 500) {
+    const text = await res.text().catch(() => "")
+    authLog("api", `${path}: HTTP ${res.status} server error`)
+    throw new RagflowError(`RAGFlow server error (${res.status}) — the service may be restarting`, "api", res.status, undefined, text)
+  }
+
+  // Parse JSON response
+  let body: any
+  try {
+    body = await res.json()
+  } catch (e: any) {
+    const text = await res.text().catch(() => "")
+    authLog("parse", `${path}: invalid JSON response — ${text.substring(0, 200)}`)
+    throw new RagflowError(`RAGFlow returned invalid JSON (HTTP ${res.status}) — service may be misconfigured`, "parse", res.status, undefined, text.substring(0, 500))
+  }
+
+  // Check RAGFlow API code
+  if (body.code !== 0 && body.code !== undefined) {
+    const msg = body.message ?? body.msg ?? JSON.stringify(body)
+    authLog("api", `${path}: code=${body.code} "${(body.message ?? "").substring(0, 200)}"`)
+    throw new RagflowError(msg, "api", res.status, body.code, JSON.stringify(body))
+  }
+
+  return body
+}
+
+async function getAllDatasetIds(): Promise<string[]> {
+  const body = await apiCall("/api/v1/datasets")
+  const data = body.data ?? []
+  return (Array.isArray(data) ? data : data.docs ?? []).map((d: any) => d.id)
+}
+
+async function ensureDataset(name: string): Promise<{ id: string; created: boolean }> {
+  const body = await apiCall("/api/v1/datasets")
+  const datasets = Array.isArray(body.data) ? body.data : body.data?.docs ?? []
+  const existing = datasets.find((d: any) => d.name === name)
+  if (existing) return { id: existing.id, created: false }
+
+  const createBody = await apiCall("/api/v1/datasets", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  })
+  const newId = Array.isArray(createBody.data) ? createBody.data[0]?.id : createBody.data?.id
+  return { id: newId, created: true }
+}
 
 const tools = [
   {
@@ -86,15 +177,37 @@ const tools = [
     },
   },
   {
+    name: "ensure_dataset",
+    description: "Find or create a dataset by name. Idempotent — returns existing ID if dataset already exists, creates it otherwise. Use this before uploading files to guarantee the dataset exists.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Dataset name (will be created if not exists)" },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "create_dataset",
+    description: "Create a new empty dataset. Errors if a dataset with the same name already exists — use ensure_dataset instead for idempotent creation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Dataset name" },
+      },
+      required: ["name"],
+    },
+  },
+  {
     name: "search_retrieval",
-    description: "Search across datasets using semantic retrieval. Returns relevant chunks ranked by similarity. Replaces the built-in ragflow_retrieval",
+    description: "Search across datasets using semantic retrieval. Returns relevant chunks ranked by similarity. If dataset_ids omitted, searches ALL available datasets automatically.",
     inputSchema: {
       type: "object",
       properties: {
         question: { type: "string", description: "Search query" },
         dataset_ids: {
           type: "array", items: { type: "string" },
-          description: "Optional dataset IDs to restrict search. If omitted, searches all datasets",
+          description: "Optional: restrict search to specific dataset IDs. If omitted, searches all datasets",
         },
         page: { type: "integer", default: 1 },
         page_size: { type: "integer", default: 10 },
@@ -108,14 +221,15 @@ const tools = [
   },
   {
     name: "upload_document",
-    description: "Upload a new document to a dataset. Provide either a URL to fetch the document from, or text content directly",
+    description: "Upload a document to a dataset. Accepts a local tmp_path (from zulip download_file), a file_url (RAGFlow fetches it), or text_content.",
     inputSchema: {
       type: "object",
       properties: {
         dataset_id: { type: "string", description: "Dataset ID" },
         file_name: { type: "string", description: "Document file name" },
-        file_url: { type: "string", description: "URL to fetch the document from (optional if text_content is provided)" },
-        text_content: { type: "string", description: "Raw text content (optional if file_url is provided)" },
+        tmp_path: { type: "string", description: "Local path to file (from download_file tool). File is deleted after upload." },
+        file_url: { type: "string", description: "URL for RAGFlow to fetch (optional)" },
+        text_content: { type: "string", description: "Raw text content (optional)" },
       },
       required: ["dataset_id", "file_name"],
     },
@@ -174,74 +288,107 @@ const tools = [
 async function handleToolCall(name: string, args: Record<string, unknown>): Promise<unknown> {
   switch (name) {
     case "list_datasets": {
-      const res = await api("/api/v1/datasets")
-      const body = await res.json()
-      if (body.code !== 0) throw new Error(body.message)
+      const body = await apiCall("/api/v1/datasets")
       return { content: [{ type: "text", text: formatDatasets(body.data) }] }
     }
     case "list_documents": {
       const { dataset_id, page = 1, page_size = 30 } = args as any
-      const res = await api(`/api/v1/datasets/${dataset_id}/documents?page=${page}&page_size=${page_size}`)
-      const body = await res.json()
-      if (body.code !== 0) throw new Error(body.message)
+      const body = await apiCall(`/api/v1/datasets/${dataset_id}/documents?page=${page}&page_size=${page_size}`)
       return { content: [{ type: "text", text: formatDocuments(body.data) }] }
     }
     case "get_document": {
       const { dataset_id, document_id } = args as any
-      const res = await api(`/api/v1/datasets/${dataset_id}/documents/${document_id}`)
-      const body = await res.json()
-      if (body.code !== 0) throw new Error(body.message)
+      const body = await apiCall(`/api/v1/datasets/${dataset_id}/documents/${document_id}`)
       return { content: [{ type: "text", text: JSON.stringify(body.data, null, 2) }] }
     }
     case "get_chunks": {
       const { dataset_id, document_id, page = 1, page_size = 100 } = args as any
-      const res = await api(`/api/v1/datasets/${dataset_id}/documents/${document_id}/chunks?page=${page}&page_size=${page_size}`)
-      const body = await res.json()
-      if (body.code !== 0) throw new Error(body.message)
+      const body = await apiCall(`/api/v1/datasets/${dataset_id}/documents/${document_id}/chunks?page=${page}&page_size=${page_size}`)
       return { content: [{ type: "text", text: formatChunks(body.data) }] }
     }
     case "get_chunk": {
       const { dataset_id, document_id, chunk_id } = args as any
-      const res = await api(`/api/v1/datasets/${dataset_id}/documents/${document_id}/chunks/${chunk_id}`)
-      const body = await res.json()
-      if (body.code !== 0) throw new Error(body.message)
+      const body = await apiCall(`/api/v1/datasets/${dataset_id}/documents/${document_id}/chunks/${chunk_id}`)
       return { content: [{ type: "text", text: JSON.stringify(body.data, null, 2) }] }
+    }
+    case "ensure_dataset": {
+      const { name } = args as any
+      const result = await ensureDataset(name)
+      return { content: [{ type: "text", text: result.created
+        ? `✅ Dataset "${name}" created. ID: ${result.id}`
+        : `✅ Dataset "${name}" already exists. ID: ${result.id}`
+      }] }
+    }
+    case "create_dataset": {
+      const { name } = args as any
+      const body = await apiCall("/api/v1/datasets", { method: "POST", body: JSON.stringify({ name }) })
+      const newId = Array.isArray(body.data) ? body.data[0]?.id : body.data?.id
+      return { content: [{ type: "text", text: `✅ Dataset "${name}" created. ID: ${newId}` }] }
     }
     case "search_retrieval": {
       const { dataset_ids, question, page = 1, page_size = 10, similarity_threshold = 0.2, vector_similarity_weight = 0.3, top_k = 1024, keyword = false } = args as any
       const payload: any = { question, page, page_size, similarity_threshold, vector_similarity_weight, top_k, keyword }
-      if (dataset_ids?.length) payload.dataset_ids = dataset_ids
-
-      // Use the RAGFlow retrieval endpoint
-      const res = await api("/api/v1/retrieval", { method: "POST", body: JSON.stringify(payload) })
-      const body = await res.json()
-      if (body.code !== 0) throw new Error(body.message)
+      if (dataset_ids?.length) {
+        payload.dataset_ids = dataset_ids
+      } else {
+        payload.dataset_ids = await getAllDatasetIds()
+      }
+      const body = await apiCall("/api/v1/retrieval", { method: "POST", body: JSON.stringify(payload) })
       return { content: [{ type: "text", text: formatRetrievalResults(body.data) }] }
     }
     case "upload_document": {
-      const { dataset_id, file_name, file_url, text_content } = args as any
-      const res = await api(`/api/v1/datasets/${dataset_id}/documents`, {
-        method: "POST",
-        body: JSON.stringify({ file_name, ...(file_url ? { url: file_url } : {}), ...(text_content ? { text_content } : {}) }),
-      })
+      const { dataset_id, file_name, tmp_path, file_url, text_content } = args as any
+      if (!dataset_id || !file_name) throw new Error("dataset_id and file_name are required")
+      const url = `${RAGFLOW_API}/api/v1/datasets/${dataset_id}/documents`
+      let res: Response
+
+      if (tmp_path) {
+        const fileBuffer = fs.readFileSync(tmp_path as string)
+        const form = new FormData()
+        form.append("file", new Blob([fileBuffer]), file_name as string)
+        if (file_url) form.append("url", file_url as string)
+        res = await fetch(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${RAGFLOW_TOKEN}` },
+          body: form,
+        })
+        try { fs.unlinkSync(tmp_path as string) } catch {}
+      } else if (file_url) {
+        const form = new FormData()
+        form.append("file", new Blob([""]), file_name as string)
+        form.append("url", file_url as string)
+        res = await fetch(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${RAGFLOW_TOKEN}` },
+          body: form,
+        })
+      } else if (text_content) {
+        const form = new FormData()
+        form.append("file", new Blob([text_content as string]), file_name as string)
+        res = await fetch(url, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${RAGFLOW_TOKEN}` },
+          body: form,
+        })
+      } else {
+        throw new Error("Provide tmp_path, file_url, or text_content")
+      }
+
+      if (!res.ok) {
+        const err = await res.text().catch(() => "")
+        throw new Error(`RAGFlow upload failed (HTTP ${res.status}): ${err.substring(0, 200)}`)
+      }
       const body = await res.json()
       if (body.code !== 0) throw new Error(body.message)
-      return { content: [{ type: "text", text: JSON.stringify(body.data, null, 2) }] }
+      return { content: [{ type: "text", text: `✅ Uploaded: ${file_name} (id: ${body.data?.[0]?.id ?? "ok"})` }] }
     }
     case "chat_completion": {
       const { chat_id, question, stream = false } = args as any
-      const res = await api(`/api/v1/chats/${chat_id}/completions`, {
-        method: "POST",
-        body: JSON.stringify({ question, stream }),
-      })
-      const body = await res.json()
-      if (body.code !== 0) throw new Error(body.message)
+      const body = await apiCall(`/api/v1/chats/${chat_id}/completions`, { method: "POST", body: JSON.stringify({ question, stream }) })
       return { content: [{ type: "text", text: body.data.answer ?? JSON.stringify(body.data, null, 2) }] }
     }
     case "list_chats": {
-      const res = await api("/api/v1/chats")
-      const body = await res.json()
-      if (body.code !== 0) throw new Error(body.message)
+      const body = await apiCall("/api/v1/chats")
       return { content: [{ type: "text", text: formatChats(body.data) }] }
     }
     case "export_wiki": {
@@ -263,12 +410,19 @@ function formatDatasets(data: any[]): string {
   return `Datasets (${data.length}):\n\nID | Name | Documents | Chunks | Parser\n--|--|--|--|--\n${rows.join("\n")}`
 }
 
-function formatDocuments(data: any[]): string {
-  if (!data?.length) return "No documents found."
-  const rows = data.map((d: any) =>
+function extractDocs(data: any): any[] {
+  if (Array.isArray(data)) return data
+  if (data?.docs) return data.docs
+  return []
+}
+
+function formatDocuments(data: any): string {
+  const docs = extractDocs(data)
+  if (!docs.length) return "No documents found."
+  const rows = docs.map((d: any) =>
     `${d.id} | ${d.name} | status=${d.status} | chunks=${d.chunk_num ?? d.chunk_count} | size=${d.size ?? "-"}`
   )
-  return `Documents (${data.length}):\n\nID | Name | Status | Chunks | Size\n--|--|--|--|--\n${rows.join("\n")}`
+  return `Documents (${docs.length}):\n\nID | Name | Status | Chunks | Size\n--|--|--|--|--\n${rows.join("\n")}`
 }
 
 function formatChunks(data: any[]): string {
@@ -300,9 +454,8 @@ async function fetchItems(baseUrl: string, dataKey: string, pageSize = 100): Pro
   let page = 1
   for (let i = 0; i < 50; i++) {
     const sep = baseUrl.includes("?") ? "&" : "?"
-    const res = await api(`${baseUrl}${sep}page=${page}&page_size=${pageSize}`)
-    const body = await res.json()
-    const items = body.data?.[dataKey] ?? []
+    const body = await apiCall(`${baseUrl}${sep}page=${page}&page_size=${pageSize}`)
+    const items = extractDocs(body.data) ?? body.data?.[dataKey] ?? []
     if (!items.length) break
     all.push(...items)
     if (items.length < pageSize) break
@@ -342,8 +495,7 @@ async function concurrentMap<T, R>(items: T[], fn: (item: T) => Promise<R>, conc
 
 async function handleExportWiki(args: { dataset_ids?: string[]; output_dir?: string; max_chunks_per_doc?: number }): Promise<unknown> {
   const outputDir = args.output_dir ?? `${import.meta.dir}/../pipeline-execution/wiki`
-  const dsRes = await api("/api/v1/datasets")
-  const dsBody = await dsRes.json()
+  const dsBody = await apiCall("/api/v1/datasets")
   let datasets: any[] = dsBody.data ?? []
   if (args.dataset_ids?.length) datasets = datasets.filter((d: any) => args.dataset_ids!.includes(d.id))
 
@@ -753,7 +905,11 @@ for await (const chunk of Bun.stdin.stream()) {
           const result = await handleToolCall(req.params.name, req.params.arguments ?? {})
           respond(id, result)
         } catch (e: any) {
-          respond(id, null, { code: -32000, message: e.message ?? String(e) })
+          const msg = e instanceof RagflowError
+            ? `❌ RAGFlow ${e.type}: ${e.message}`
+            : `❌ Error: ${e.message ?? String(e)}`
+          log(msg)
+          respond(id, null, { code: -32000, message: msg })
         }
       } else {
         respond(id, null, { code: -32601, message: `Method not found: ${req.method}` })

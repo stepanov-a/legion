@@ -14,7 +14,9 @@
       }
     }
   },
-  "permission": {},
+  "permission": {
+    "external_directory": "allow"
+  },
   "references": {
     "effect": {
       "repository": "github.com/Effect-TS/effect-smol",
@@ -59,6 +61,21 @@
     "media": {
       "type": "local",
       "command": ["bun", "run", "/legion/.legion/mcp-media/index.ts"],
+      "enabled": true
+    },
+    "web-search": {
+      "type": "local",
+      "command": ["bun", "run", "/legion/.legion/mcp-web-search/index.ts"],
+      "enabled": true
+    },
+    "zulip-messages": {
+      "type": "local",
+      "command": ["bun", "run", "/legion/.legion/mcp-zulip-messages/index.ts"],
+      "enabled": true
+    },
+    "deep-research": {
+      "type": "local",
+      "command": ["bun", "run", "/legion/.legion/mcp-deep-research/index.ts"],
       "enabled": true
     }
   },

@@ -1,0 +1,122 @@
+# RAGFlow stack — поднимается отдельно от Legion
+# Запуск: docker compose -f docker-compose.ragflow.yml up -d
+# Legion видит RAGFlow через 172.18.0.1:59380
+
+x-defaults: &defaults
+  networks:
+    - legion-net
+
+networks:
+  legion-net:
+    external: true
+
+volumes:
+  esdata01:
+  mysql_data:
+  redis_data:
+
+services:
+  es01:
+    <<: *defaults
+    image: elasticsearch:8.11.3
+    profiles:
+      - elasticsearch
+    volumes:
+      - esdata01:/usr/share/elasticsearch/data
+    ports:
+      - "${ES_PORT:-1200}:9200"
+    environment:
+      - node.name=es01
+      - ELASTIC_PASSWORD=infini_rag_flow
+      - bootstrap.memory_lock=false
+      - discovery.type=single-node
+      - xpack.security.enabled=true
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+      - "cluster.routing.allocation.disk.watermark.low=5gb"
+      - "cluster.routing.allocation.disk.watermark.high=3gb"
+      - "cluster.routing.allocation.disk.watermark.flood_stage=2gb"
+    mem_limit: ${MEM_LIMIT:-4g}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -u elastic:infini_rag_flow http://localhost:9200"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+    restart: unless-stopped
+
+  mysql:
+    <<: *defaults
+    image: mysql:8.0.39
+    environment:
+      MYSQL_ROOT_PASSWORD: infini_rag_flow
+    command:
+      --max_connections=1000
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+      --tls_version="TLSv1.2,TLSv1.3"
+      --init-file /data/application/init.sql
+      --binlog_expire_logs_seconds=604800
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./debug/init.sql:/data/application/init.sql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-uroot", "-pinfini_rag_flow"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    <<: *defaults
+    image: valkey/valkey:8
+    command: ["redis-server", "--requirepass", "infini_rag_flow", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "infini_rag_flow", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    restart: unless-stopped
+
+  ragflow:
+    <<: *defaults
+    depends_on:
+      mysql:
+        condition: service_healthy
+    image: infiniflow/ragflow:latest
+    command:
+      - --enable-adminserver
+      - --enable-mcpserver
+      - --init-superuser
+      - --mcp-host=0.0.0.0
+      - --mcp-port=9382
+      - --mcp-base-url=http://127.0.0.1:9380
+      - --mcp-script-path=/ragflow/mcp/server/server.py
+      - --mcp-mode=self-host
+      - --mcp-host-api-key=ragflow-6041ca5b878d5707f20b69eff2ac0334
+    ports:
+      - "80:80"
+      - "443:443"
+      - "9380:9380"
+      - "9381:9381"
+      - "9382:9382"
+    volumes:
+      - /home/neo/Projects/ragflow/docker/ragflow-logs:/ragflow/logs
+      - /home/neo/Projects/ragflow/docker/nginx/ragflow.conf:/etc/nginx/conf.d/ragflow.conf
+      - /home/neo/Projects/ragflow/docker/nginx/proxy.conf:/etc/nginx/proxy.conf
+      - /home/neo/Projects/ragflow/docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - /home/neo/Projects/ragflow/docker/service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template
+      - /home/neo/Projects/ragflow/docker/entrypoint.sh:/ragflow/entrypoint.sh
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
