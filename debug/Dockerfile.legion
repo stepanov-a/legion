@@ -12,7 +12,8 @@ RUN mkdir -p /legion && chown 1000:1000 /legion
 WORKDIR /legion
 
 COPY package.json bun.lock ./
-RUN bun install --production 2>&1 | tail -5
+RUN bun install --frozen-lockfile 2>&1 | tail -5
+RUN bun run --cwd packages/opencode build 2>&1 | tail -5
 
 COPY . .
 
