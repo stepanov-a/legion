@@ -134,7 +134,7 @@ const s3ForConfig = process.env.S3_ENDPOINT && process.env.S3_ACCESS_KEY && proc
 const MAX_ZULIP_MSG = 9000  // 10K limit minus safety margin
 
 async function zulipSendMessage(botEmail: string, botApiKey: string, recipient: string, content: string, msgType?: string, topic?: string): Promise<void> {
-  const zulipUrl = "https://zulip"
+  const zulipUrl = process.env.ZULIP_URL ?? "https://zulip"
   const zulipHost = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
   const auth = "Basic " + Buffer.from(`${botEmail}:${botApiKey}`).toString("base64")
   const body: Record<string, string> = { content }
