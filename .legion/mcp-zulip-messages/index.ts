@@ -4,8 +4,11 @@ import * as fs from "fs"
 
 const LEGION_DIR = path.resolve(import.meta.dir, "..")
 const BOTS_PATH = path.join(LEGION_DIR, "bots.jsonc")
-const ZULIP_URL = process.env.ZULIP_URL ?? "https://zulip"
-const ZULIP_HOST = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
+
+const ZULIP_URL = process.env.ZULIP_URL
+if (!ZULIP_URL) { console.error("ZULIP_URL is required"); process.exit(1) }
+const ZULIP_HOST = process.env.ZULIP_API_HOST
+if (!ZULIP_HOST) { console.error("ZULIP_API_HOST is required"); process.exit(1) }
 
 interface BotEntry {
   name: string
@@ -60,7 +63,8 @@ const respond = (id: number | string | null, result?: unknown, error?: unknown) 
 }
 const log = (msg: string) => process.stderr.write(msg + "\n")
 
-const LEGION_WEBHOOK_URL = process.env.LEGION_WEBHOOK_URL ?? "http://localhost:3000/webhook/zulip"
+const LEGION_WEBHOOK_URL = process.env.LEGION_WEBHOOK_URL
+if (!LEGION_WEBHOOK_URL) { console.error("LEGION_WEBHOOK_URL is required"); process.exit(1) }
 
 const tools = [
   {

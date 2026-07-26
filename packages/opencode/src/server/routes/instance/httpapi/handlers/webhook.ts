@@ -134,8 +134,9 @@ const s3ForConfig = process.env.S3_ENDPOINT && process.env.S3_ACCESS_KEY && proc
 const MAX_ZULIP_MSG = 9000  // 10K limit minus safety margin
 
 async function zulipSendMessage(botEmail: string, botApiKey: string, recipient: string, content: string, msgType?: string, topic?: string): Promise<void> {
-  const zulipUrl = "https://zulip"
-  const zulipHost = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
+  const zulipUrl = process.env.ZULIP_URL ?? ""
+  const zulipHost = process.env.ZULIP_API_HOST ?? ""
+  if (!zulipUrl || !zulipHost) { console.error("[network] zulipSendMessage: ZULIP_URL and ZULIP_API_HOST must be set"); return }
   const auth = "Basic " + Buffer.from(`${botEmail}:${botApiKey}`).toString("base64")
   const body: Record<string, string> = { content }
   if (msgType === "stream") {
@@ -210,14 +211,48 @@ async function sendZulipReply(botEmail: string, botApiKey: string, toEmail: stri
   }
 }
 
-async function getBotApiKey(commandName: string): Promise<string | null> {
+function getBotKeyByEmail(botEmail: string): { email: string; apiKey: string } | null {
+  if (!botEmail) return null
+  try {
+    const botsPath = path.join(LEGION_DIR, "bots.jsonc")
+    const raw = JSON.parse(fs.readFileSync(botsPath, "utf-8"))
+    const bot = (raw.bots ?? []).find((b: any) => b.zulip_email === botEmail)
+    if (bot?.zulip_api_key) return { email: bot.zulip_email, apiKey: bot.zulip_api_key }
+  } catch {}
+  return null
+}
+
+async function getBotApiKey(commandName: string, botEmail?: string): Promise<{ email: string; apiKey: string } | null> {
+  // Try by email first (most reliable)
+  if (botEmail) {
+    const local = getBotKeyByEmail(botEmail)
+    if (local) return local
+  }
+
+  // Fallback: S3 by command name
   if (!s3ForConfig || !commandName) return null
   try {
     const key = botS3ConfigKey(commandName)
     const res = await s3ForConfig.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: key }))
     const cfg = JSON.parse(await res.Body!.transformToString("utf-8"))
-    return cfg.zulip_api_key ?? null
-  } catch { return null }
+    if (cfg.zulip_api_key) return { email: cfg.zulip_email ?? botEmail ?? "", apiKey: cfg.zulip_api_key }
+  } catch {}
+
+  // Last resort: scan all S3 configs by email
+  if (botEmail && s3ForConfig) {
+    try {
+      const { ListObjectsV2Command } = await import("@aws-sdk/client-s3")
+      const list = await s3ForConfig.send(new ListObjectsV2Command({ Bucket: BOTS_S3_BUCKET, Prefix: "bot-prompts/" }))
+      for (const item of list.Contents ?? []) {
+        if (!item.Key?.endsWith("/config.json")) continue
+        const dr = await s3ForConfig.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: item.Key }))
+        const dc = JSON.parse(await dr.Body!.transformToString("utf-8"))
+        if (dc.zulip_email === botEmail && dc.zulip_api_key) return { email: dc.zulip_email, apiKey: dc.zulip_api_key }
+      }
+    } catch {}
+  }
+
+  return null
 }
 
 // ── Stream context (fetch recent messages for bot awareness) ──
@@ -228,8 +263,9 @@ async function fetchStreamContext(streamName: string, topicName: string): Promis
       { operator: "stream", operand: streamName },
       { operator: "topic", operand: topicName },
     ])
-    const zulipUrl = process.env.ZULIP_URL ?? "https://zulip"
-    const zulipHost = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
+    const zulipUrl = process.env.ZULIP_URL ?? ""
+    const zulipHost = process.env.ZULIP_API_HOST ?? ""
+    if (!zulipUrl || !zulipHost) return ""
     const auth = "Basic " + Buffer.from(
       `${process.env.ZULIP_EMAIL}:${process.env.ZULIP_API_KEY}`
     ).toString("base64")
@@ -248,11 +284,14 @@ async function fetchStreamContext(streamName: string, topicName: string): Promis
   } catch { return "" }
 }
 
-async function learnBotToken(commandName: string, token: string): Promise<void> {
-  if (!s3ForConfig || !commandName || !token) return
+async function learnBotToken(commandName: string, token: string, botEmail?: string): Promise<void> {
+  if (!token) return
+  const botKey = await getBotApiKey(commandName, botEmail)
+  if (!botKey) return
+  const s3key = botS3ConfigKey(commandName)
+  if (!s3ForConfig) return
   try {
-    const key = botS3ConfigKey(commandName)
-    const res = await s3ForConfig.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: key }))
+    const res = await s3ForConfig.send(new GetObjectCommand({ Bucket: BOTS_S3_BUCKET, Key: s3key }))
     const text = await res.Body!.transformToString("utf-8")
     const config = JSON.parse(text)
     if (!config.service_tokens) config.service_tokens = []
@@ -260,7 +299,7 @@ async function learnBotToken(commandName: string, token: string): Promise<void> 
       config.service_tokens.push(token)
       await s3ForConfig.send(new PutObjectCommand({
         Bucket: BOTS_S3_BUCKET,
-        Key: key,
+        Key: s3key,
         Body: JSON.stringify(config, null, 2),
         ContentType: "application/json",
       }))
@@ -454,9 +493,9 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       const replyTarget = isDm ? senderEmail : stream
       const replyTopic = isDm ? undefined : (topic || "ответ")
       if (hasTools && whBotEmail && commandName !== "default") {
-        const botApiKey = yield* Effect.tryPromise(() => getBotApiKey(commandName)).pipe(Effect.catch(() => Effect.succeed(null)))
-        if (botApiKey) {
-          sendZulipReply(whBotEmail, botApiKey, replyTarget, "✅ Принял запрос.", isDm ? "private" : "stream", isDm ? undefined : stream, replyTopic)
+        const botKey = yield* Effect.tryPromise(() => getBotApiKey(commandName, whBotEmail)).pipe(Effect.catch(() => Effect.succeed(null)))
+        if (botKey) {
+          sendZulipReply(botKey.email, botKey.apiKey, replyTarget, "✅ Принял запрос.", isDm ? "private" : "stream", isDm ? undefined : stream, replyTopic)
         }
       }
 
@@ -482,16 +521,16 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       if (result) {
         const responseText = (result.parts as any[]).filter((p: any) => p.type === "text").map((p: any) => p.text).join("\n").trim()
         if (responseText && commandName !== "default") {
-          const botApiKey = yield* Effect.tryPromise(() => getBotApiKey(commandName)).pipe(Effect.catch(() => Effect.succeed(null)))
-          if (botApiKey) {
-            sendZulipReply(whBotEmail, botApiKey, replyTarget, responseText, isDm ? "private" : "stream", isDm ? undefined : stream, replyTopic)
+          const botKey = yield* Effect.tryPromise(() => getBotApiKey(commandName, whBotEmail)).pipe(Effect.catch(() => Effect.succeed(null)))
+          if (botKey) {
+            sendZulipReply(botKey.email, botKey.apiKey, replyTarget, responseText, isDm ? "private" : "stream", isDm ? undefined : stream, replyTopic)
           }
         }
       }
 
       // Save service token (fire-and-forget)
       if (whToken && commandName !== "default") {
-        learnBotToken(commandName, whToken)
+        learnBotToken(commandName, whToken, whBotEmail)
       }
 
       const elapsed = Date.now() - startTime

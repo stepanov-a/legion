@@ -36,3 +36,4 @@ logs/
 tsconfig.tsbuildinfo
 *.log
 secrets/*
+.git-rewrite/*

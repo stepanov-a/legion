@@ -8,7 +8,8 @@ const ZULIP_EMAIL = process.env.ZULIP_EMAIL
 if (!ZULIP_EMAIL) { console.error("ZULIP_EMAIL is required"); process.exit(1) }
 const ZULIP_API_KEY = process.env.ZULIP_API_KEY
 if (!ZULIP_API_KEY) { console.error("ZULIP_API_KEY is required"); process.exit(1) }
-const ZULIP_HOST = process.env.ZULIP_API_HOST ?? "legion.zulip.local:8443"
+const ZULIP_HOST = process.env.ZULIP_API_HOST
+if (!ZULIP_HOST) { console.error("ZULIP_API_HOST is required"); process.exit(1) }
 
 const authHeader = "Basic " + Buffer.from(`${ZULIP_EMAIL}:${ZULIP_API_KEY}`).toString("base64")
 

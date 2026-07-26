@@ -32,9 +32,12 @@ if (s3Available) {
   })
 }
 
-const LEGION_PAYLOAD_URL = process.env.LEGION_PAYLOAD_URL ?? "http://legion.local:3000/webhook/zulip"
-const LEGION_RELOAD_URL = process.env.LEGION_RELOAD_URL ?? "http://localhost:3000/webhook/reload"
-const LEGION_RESET_SESSION_URL = process.env.LEGION_RESET_SESSION_URL ?? "http://localhost:3000/webhook/reset-session"
+const LEGION_PAYLOAD_URL = process.env.LEGION_PAYLOAD_URL
+if (!LEGION_PAYLOAD_URL) { console.error("LEGION_PAYLOAD_URL is required"); process.exit(1) }
+const LEGION_RELOAD_URL = process.env.LEGION_RELOAD_URL
+if (!LEGION_RELOAD_URL) { console.error("LEGION_RELOAD_URL is required"); process.exit(1) }
+const LEGION_RESET_SESSION_URL = process.env.LEGION_RESET_SESSION_URL
+if (!LEGION_RESET_SESSION_URL) { console.error("LEGION_RESET_SESSION_URL is required"); process.exit(1) }
 
 function reloadWebhookCache(): void {
   fetch(LEGION_RELOAD_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {})
@@ -63,6 +66,7 @@ const respond = (id: number | string | null, result?: unknown, error?: unknown) 
 
 // ── Zulip API ────────────────────────────────────────────────────
 const ZULIP_API_HOST = process.env.ZULIP_API_HOST ?? ""
+const ZULIP_REALM_HOST = ZULIP_API_HOST ? ZULIP_API_HOST.split(":")[0] : "zulip.local"
 
 async function zulipFetch(path: string, init: RequestInit = {}): Promise<any> {
   const headers: Record<string, string> = {
@@ -555,7 +559,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       }
 
       const botUserId = botData.user_id
-      const botEmail = botData.email ?? `${shortName}-bot@zulip.local`
+      const botEmail = botData.email ?? `${shortName}-bot@${ZULIP_REALM_HOST}`
       const botApiKey = botData.api_key ?? ""
 
       await zulipFetch(`/bots/${botUserId}`, {

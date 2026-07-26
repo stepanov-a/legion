@@ -69,7 +69,7 @@ sed -i "s/^ZULIP_API_KEY=.*/ZULIP_API_KEY=\$API_KEY/" debug/.env
 sed -i "s/^ZULIP_API_KEY=.*/ZULIP_API_KEY=\$API_KEY/" .env
 
 # 10. Создать ботов
-for bot_name in adminbotv2 consultantbot; do
+for bot_name in adminbotv2 steven; do
   curl -sk -X POST "https://localhost:8443/api/v1/bots" \
     -H "Host: legion.zulip.local:8443" \
     -u "a.stepanov@2035.university:\$API_KEY" \
