@@ -13,6 +13,7 @@ import * as fs from "fs"
 import { loadConfig, getCachedCommand, clearConfigCache } from "./config"
 import { sessionCacheKey, getOrCreateSessionID, clearSessionCache } from "./session"
 import { parseFrontmatter } from "./frontmatter"
+import { matchesAllow } from "./allow"
 import { GetObjectCommand } from "@aws-sdk/client-s3"
 import { s3ForConfig, botS3ConfigKey, getBotApiKey, learnBotToken, syncPromptsFromS3 } from "./s3"
 import { sendZulipReply, fetchStreamContext, fetchDMContext } from "./zulip"
@@ -165,15 +166,7 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
       yield* Effect.logInfo("webhook.command", { command: commandName, agent, model: modelStr ?? "default", mcp: JSON.stringify(mcp), allow: JSON.stringify(allow), bodyChars: body.length })
 
       if (allow.length > 0) {
-        const lowerEmail = senderEmail.toLowerCase()
-        const matched = allow.some(pattern => {
-          const lowerPattern = pattern.toLowerCase()
-          if (lowerPattern === lowerEmail) return true
-          if (lowerPattern.endsWith("*") && lowerEmail.startsWith(lowerPattern.slice(0, -1))) return true
-          if (lowerPattern.startsWith("*") && lowerEmail.endsWith(lowerPattern.slice(1))) return true
-          return false
-        })
-        if (!matched) {
+        if (!matchesAllow(allow, senderEmail)) {
           console.error("webhook.deny", { senderEmail, allow: JSON.stringify(allow) })
           return { content: "❌ Access denied." }
         }
