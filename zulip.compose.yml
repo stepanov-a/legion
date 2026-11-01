@@ -1,0 +1,148 @@
+x-defaults: &defaults
+  networks:
+    - legion-net
+
+networks:
+  legion-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.19.0.0/16
+
+volumes:
+  zulip-postgres:
+  zulip-rabbitmq:
+  zulip-redis:
+  zulip-data:
+
+services:
+  zulip-database:
+    <<: *defaults
+    image: zulip/zulip-postgresql:14
+    restart: unless-stopped
+    secrets:
+      - zulip__postgres_password
+    environment:
+      POSTGRES_DB: zulip
+      POSTGRES_USER: zulip
+      POSTGRES_PASSWORD_FILE: /run/secrets/zulip__postgres_password
+    volumes:
+      - zulip-postgres:/var/lib/postgresql/data:rw
+    attach: false
+
+  zulip-memcached:
+    <<: *defaults
+    image: memcached:alpine
+    restart: unless-stopped
+    secrets:
+      - zulip__memcached_password
+    environment: &memcached-env
+      SASL_CONF_PATH: /home/memcache/memcached.conf
+      MEMCACHED_SASL_PWDB: /home/memcache/memcached-sasl-db
+      MEMCACHED_PASSWORD_FILE: /run/secrets/zulip__memcached_password
+    command:
+      - sh
+      - -euc
+      - |
+        echo mech_list: plain > "$$SASL_CONF_PATH"
+        echo "zulip@$$HOSTNAME:$$(cat $$MEMCACHED_PASSWORD_FILE)" > "$$MEMCACHED_SASL_PWDB"
+        echo "zulip@localhost:$$(cat $$MEMCACHED_PASSWORD_FILE)" >> "$$MEMCACHED_SASL_PWDB"
+        exec memcached -S
+    attach: false
+
+  zulip-rabbitmq:
+    <<: *defaults
+    image: rabbitmq:4.2
+    restart: unless-stopped
+    secrets:
+      - zulip__rabbitmq_password
+    environment: &rabbitmq-env
+      RABBITMQ_DEFAULT_USER: zulip
+      RABBITMQ_PASSWORD_FILE: /run/secrets/zulip__rabbitmq_password
+    volumes:
+      - zulip-rabbitmq:/var/lib/rabbitmq:rw
+    command:
+      - sh
+      - -euc
+      - |
+        export RABBITMQ_DEFAULT_PASS="$$(cat $$RABBITMQ_PASSWORD_FILE)"
+        echo "default_user = $$RABBITMQ_DEFAULT_USER" >> /etc/rabbitmq/rabbitmq.conf
+        echo "default_pass = $$RABBITMQ_DEFAULT_PASS" >> /etc/rabbitmq/rabbitmq.conf
+        exec docker-entrypoint.sh rabbitmq-server
+    attach: false
+
+  zulip-redis:
+    <<: *defaults
+    image: redis:alpine
+    restart: unless-stopped
+    secrets:
+      - zulip__redis_password
+    environment: &redis-env
+      REDIS_PASSWORD_FILE: /run/secrets/zulip__redis_password
+    volumes:
+      - zulip-redis:/data:rw
+    command:
+      - sh
+      - -euc
+      - |
+        PASS="$$(cat $$REDIS_PASSWORD_FILE)"
+        exec redis-server --requirepass "$$PASS"
+    attach: false
+
+  zulip:
+    <<: *defaults
+    image: ghcr.io/zulip/zulip-server:12.1-0
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    secrets:
+      - zulip__postgres_password
+      - zulip__memcached_password
+      - zulip__rabbitmq_password
+      - zulip__redis_password
+      - zulip__secret_key
+      - zulip__email_password
+    environment:
+      SETTING_EXTERNAL_HOST: zulip.nti.kts.tech
+      SETTING_ZULIP_ADMINISTRATOR: a.stepanov@2035.university
+      SETTING_REMOTE_POSTGRES_HOST: zulip-database
+      SETTING_MEMCACHED_LOCATION: "zulip-memcached:11211"
+      SETTING_RABBITMQ_HOST: zulip-rabbitmq
+      SETTING_REDIS_HOST: zulip-redis
+      SETTING_STATIC_URL: https://legion.zulip.nti.kts.tech/static/
+      SETTING_OUTGOING_WEBHOOK_TIMEOUT_SECONDS: "60"
+      MANUAL_CONFIGURATION: "true"
+      CONFIG_http_proxy__allow_ranges: "172.18.0.0/16,172.17.0.0/16,172.19.0.0/16"
+      LOADBALANCER_IPS: "${LOADBALANCER_IPS:-172.18.0.0/16}"
+      CERTIFICATES: "self-signed"
+    volumes:
+#      - ./debug/certs/zulip.nti.kts.tech.fullchain.pem:/etc/ssl/certs/zulip.combined-chain.crt:ro
+ #     - ./debug/certs/zulip.nti.kts.tech.private.pem:/etc/ssl/private/zulip.key:ro
+      - zulip-data:/data:rw
+      - ./zulip.settings.py:/etc/zulip/settings.py:rw
+    ulimits:
+      nofile:
+        soft: 1000000
+        hard: 1048576
+    depends_on:
+      - zulip-database
+      - zulip-memcached
+      - zulip-rabbitmq
+      - zulip-redis
+
+secrets:
+  zulip__postgres_password:
+    file: ./debug/secrets/zulip__postgres_password
+  zulip__memcached_password:
+    file: ./debug/secrets/zulip__memcached_password
+  zulip__rabbitmq_password:
+    file: ./debug/secrets/zulip__rabbitmq_password
+  zulip__redis_password:
+    file: ./debug/secrets/zulip__redis_password
+  zulip__secret_key:
+    file: ./debug/secrets/zulip__secret_key
+  zulip__email_password:
+    file: ./debug/secrets/zulip__email_password
