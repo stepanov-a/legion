@@ -155,8 +155,9 @@ export const webhookHandlers = HttpApiBuilder.group(PublicWebhookApi, "webhooks"
           const res = await s3ForConfig!.send(new GetObjectCommand({ Bucket: process.env.S3_BUCKET ?? "", Key: botCfgKey }))
           return JSON.parse(await res.Body!.transformToString("utf-8"))
         }).pipe(Effect.catch(() => Effect.succeed(undefined as any)))
-        if (botCfg && botCfg.service_tokens?.length > 0 && !botCfg.service_tokens.includes(receivedToken)) {
-          console.warn("webhook.token_mismatch (ignored)", { botEmail, commandName })
+        if (botCfg?.service_tokens?.length > 0 && !botCfg.service_tokens.includes(receivedToken)) {
+          console.error("webhook.error: token mismatch", { botEmail, commandName })
+          return { content: "❌ Invalid token." }
         }
       }
 

@@ -1,7 +1,7 @@
 // Тесты allow-матчера: проверка доступа из фронтматтера команды.
 // Зачем: логика была inline в handler.ts и не тестировалась вообще, хотя решает,
 // кого пускают к команде. Тесты фиксируют фактическое поведение (регистро-
-// независимое сравнение, wildcard-суффикс и wildcard-префикс), чтобы будущие
+// ЗАВИСИМОЕ сравнение, wildcard-суффикс и wildcard-префикс), чтобы будущие
 // правки не открыли доступ молча.
 import { describe, expect, test } from "bun:test"
 
@@ -19,10 +19,20 @@ describe("matchesAllow", () => {
     expect(matchesAllow(["user@dom.tld"], "user@dom.tldx")).toBe(false)
   })
 
-  test("сравнение регистронезависимое (обе стороны приводятся к нижнему регистру)", () => {
-    expect(matchesAllow(["User@Dom.TLD"], "user@dom.tld")).toBe(true)
-    expect(matchesAllow(["user@dom.tld"], "USER@DOM.TLD")).toBe(true)
-    expect(matchesAllow(["*@DOM.tld"], "anyone@dom.tld")).toBe(true)
+  // Регистронезависимое сравнение — отдельное продуктовое решение (оно расширяет
+  // доступ), а не побочный эффект рефакторинга. Пока решение не принято явно,
+  // матчер обязан оставаться регистрозависимым, как в монолите до сплита.
+  test("сравнение регистрозависимое: регистр отличается → доступа нет", () => {
+    expect(matchesAllow(["User@Dom.TLD"], "user@dom.tld")).toBe(false)
+    expect(matchesAllow(["user@dom.tld"], "USER@DOM.TLD")).toBe(false)
+    expect(matchesAllow(["*@DOM.tld"], "anyone@dom.tld")).toBe(false)
+    expect(matchesAllow(["*@dom.tld"], "anyone@DOM.TLD")).toBe(false)
+    expect(matchesAllow(["user@dom*"], "User@domain.tld")).toBe(false)
+  })
+
+  test("регистр совпадает посимвольно → доступ есть", () => {
+    expect(matchesAllow(["User@Dom.TLD"], "User@Dom.TLD")).toBe(true)
+    expect(matchesAllow(["*@Dom.TLD"], "anyone@Dom.TLD")).toBe(true)
   })
 
   test("wildcard-суффикс user@dom* ловит поддомены/зоны этого пользователя и не ловит другого", () => {
