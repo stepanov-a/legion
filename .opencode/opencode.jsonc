@@ -2,30 +2,89 @@
   "$schema": "https://opencode.ai/config.json",
   "provider": {
     "deepseek": {
-      "name": "DeepSeek",
-      "api": "https://api.opencode.ai/v1",
+      "name": "DeepSeek (OpenCode Zen)",
       "npm": "@ai-sdk/openai-compatible",
-      "apiKey": "sk-vIwnWZT7NyuZAQotnmaf6jVSsfh0KU1sJazu3ED1oo3zZftLZ7icioDDoDW0wyEA",
+      "options": {
+        "baseURL": "https://api.opencode.ai/v1",
+        "apiKey": "{env:DEEPSEEK_API_KEY}"
+      },
       "models": {
         "deepseek-v4-flash": {
           "id": "deepseek-v4-flash",
           "tool_call": true
         }
       }
+    },
+    "nti": {
+      "name": "NTI API",
+      "api": "https://api.nti.kts.tech/v1",
+      "npm": "@ai-sdk/openai-compatible",
+      "options": {
+        "apiKey": "{env:NTI_API_KEY}"
+      },
+      "models": {
+        "claude-opus-4.8": { "id": "claude-opus-4.8", "tool_call": true },
+        "claude-opus-4.8-thinking": { "id": "claude-opus-4.8-thinking", "tool_call": true },
+        "claude-opus-4.8-web-search": { "id": "claude-opus-4.8-web-search", "tool_call": true },
+        "claude-opus-4.8-thinking-web-search": { "id": "claude-opus-4.8-thinking-web-search", "tool_call": true },
+        "claude-sonnet-4.6": { "id": "claude-sonnet-4.6", "tool_call": true },
+        "gpt-5.5": { "id": "gpt-5.5", "tool_call": true },
+        "gpt-5.3-codex": { "id": "gpt-5.3-codex", "tool_call": true },
+        "o3": { "id": "o3", "tool_call": true },
+        "o4-mini": { "id": "o4-mini", "tool_call": true },
+        "gemini-3.1-pro": { "id": "gemini-3.1-pro", "tool_call": true },
+        "gemini-3.1-flash": { "id": "gemini-3.1-flash", "tool_call": true },
+        "gemini-3.5-flash": { "id": "gemini-3.5-flash", "tool_call": true },
+        "gemini-3-pro-image-preview": { "id": "gemini-3-pro-image-preview", "tool_call": true },
+        "deepseek-v4-pro": { "id": "deepseek-v4-pro", "tool_call": true },
+        "deepseek-v4-flash": { "id": "deepseek-v4-flash", "tool_call": true },
+        "deepseek-chat": { "id": "deepseek-chat", "tool_call": true },
+        "qwen3.6": { "id": "qwen3.6", "tool_call": true },
+        "qwen3.5-397b-a17b": { "id": "qwen3.5-397b-a17b", "tool_call": true },
+        "gemma-4-26b-a4b": { "id": "gemma-4-26b-a4b", "tool_call": true },
+        "kimi-k2.6": { "id": "kimi-k2.6", "tool_call": true },
+        "glm-5.2": { "id": "glm-5.2", "tool_call": true },
+        "minimax-m3": { "id": "minimax-m3", "tool_call": true },
+        "perplexity-sonar-pro": { "id": "perplexity-sonar-pro", "tool_call": true },
+        "perplexity-sonar": { "id": "perplexity-sonar", "tool_call": true },
+        "qwen3.6-cloudru": { "id": "qwen3.6-cloudru", "tool_call": true },
+        "deepseek-chat-cloudru": { "id": "deepseek-chat-cloudru", "tool_call": true },
+        "claude-opus-4.8-cloudru": { "id": "claude-opus-4.8-cloudru", "tool_call": true },
+        "claude-sonnet-4.6-cloudru": { "id": "claude-sonnet-4.6-cloudru", "tool_call": true },
+        "gpt-5.5-cloudru": { "id": "gpt-5.5-cloudru", "tool_call": true },
+        "gpt-5.3-codex-cloudru": { "id": "gpt-5.3-codex-cloudru", "tool_call": true },
+        "gemini-3.1-pro-cloudru": { "id": "gemini-3.1-pro-cloudru", "tool_call": true },
+        "gemini-3.1-flash-cloudru": { "id": "gemini-3.1-flash-cloudru", "tool_call": true },
+        "kimi-k2.6-cloudru": { "id": "kimi-k2.6-cloudru", "tool_call": true },
+        "deepseek-v4-pro-cloudru": { "id": "deepseek-v4-pro-cloudru", "tool_call": true },
+        "deepseek-v4-flash-cloudru": { "id": "deepseek-v4-flash-cloudru", "tool_call": true },
+        "qwen3.5-397b-a17b-cloudru": { "id": "qwen3.5-397b-a17b-cloudru", "tool_call": true },
+        "glm-5.2-cloudru": { "id": "glm-5.2-cloudru", "tool_call": true },
+        "minimax-m3-cloudru": { "id": "minimax-m3-cloudru", "tool_call": true },
+        "qwen3.6-local": { "id": "qwen3.6-local", "tool_call": true },
+        "gemma-4-26b-a4b-local": { "id": "gemma-4-26b-a4b-local", "tool_call": true },
+        "laguna-s2.1-local": { "id": "laguna-s2.1-local", "tool_call": true },
+        "laguna-s2.1-fast-local": { "id": "laguna-s2.1-fast-local", "tool_call": true },
+        "bge-m3": { "id": "bge-m3", "tool_call": true }
+      }
     }
   },
   "permission": {
-    "external_directory": "allow"
+    "external_directory": "deny",
+    "bash": "deny",
+    "edit": "deny",
+    "webfetch": "deny",
+    "task": "deny"
   },
   "references": {
     "effect": {
       "repository": "github.com/Effect-TS/effect-smol",
-      "description": "Use for Effect v4 and effect-smol implementation details",
+      "description": "Use for Effect v4 and effect-smol implementation details"
     },
     "opencode-local": {
       "path": "~/.local/share/opencode",
-      "description": "Contains opencode logs and data",
-    },
+      "description": "Contains opencode logs and data"
+    }
   },
   "mcp": {
     "presentation": {
@@ -82,10 +141,20 @@
       "type": "local",
       "command": ["bun", "run", "/legion/.legion/mcp-session-logger/index.ts"],
       "enabled": true
+    },
+    "file-reader": {
+      "type": "local",
+      "command": ["bun", "run", "/legion/.legion/mcp-file-reader/index.ts"],
+      "enabled": true
+    },
+    "atlas-guide": {
+      "type": "local",
+      "command": ["bun", "run", "/legion/.legion/mcp-atlas-guide/index.ts"],
+      "enabled": true
     }
   },
   "tools": {
     "github-triage": false,
-    "github-pr-search": false,
-  },
+    "github-pr-search": false
+  }
 }
