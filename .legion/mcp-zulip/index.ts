@@ -11,7 +11,18 @@ if (!ZULIP_API_KEY) { console.error("ZULIP_API_KEY is required"); process.exit(1
 const ZULIP_HOST = process.env.ZULIP_API_HOST
 if (!ZULIP_HOST) { console.error("ZULIP_API_HOST is required"); process.exit(1) }
 
+const ZULIP_EXTERNAL_URL = process.env.ZULIP_EXTERNAL_URL ?? `https://${ZULIP_HOST.replace(/:80$/, "").replace(/:443$/, "")}`
 const authHeader = "Basic " + Buffer.from(`${ZULIP_EMAIL}:${ZULIP_API_KEY}`).toString("base64")
+
+function getBotAuth(botEmail: string): string | null {
+  try {
+    const botsPath = path.join(process.env.LEGION_PROJECT_DIR ?? "/legion", ".legion", "bots.jsonc")
+    const raw = JSON.parse(fs.readFileSync(botsPath, "utf-8"))
+    const bot = (raw.bots ?? []).find((b: any) => b.zulip_email === botEmail)
+    if (bot?.zulip_api_key) return "Basic " + Buffer.from(`${botEmail}:${bot.zulip_api_key}`).toString("base64")
+  } catch {}
+  return null
+}
 
 async function zulipFetch(path: string, init: RequestInit = {}): Promise<any> {
   const res = await fetch(`${ZULIP_URL}/api/v1${path}`, {
@@ -193,6 +204,19 @@ const tools = [
       required: ["user_id"],
     },
   },
+  {
+    name: "upload_to_zulip",
+    description: "Upload a generated file to Zulip and return a downloadable link. Use this when you need to share a file with the user. The file will be stored in Zulip uploads and accessible via the returned link.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "File content (text)" },
+        file_name: { type: "string", description: "Desired filename with extension (e.g. report.docx, summary.md)" },
+        bot_email: { type: "string", description: "Your bot email to upload as yourself (required for users to be able to download)" },
+      },
+      required: ["content", "file_name", "bot_email"],
+    },
+  },
 ]
 
 async function handleToolCall(name: string, args: Record<string, unknown>): Promise<{ content: Array<{ type: string; text: string }> }> {
@@ -314,6 +338,45 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       if (!userId) throw new Error("user_id is required")
       await zulipFetch(`/bots/${userId}`, { method: "DELETE" })
       return { content: [{ type: "text", text: `✅ Bot ${userId} deactivated.` }] }
+    }
+
+    // ── upload_to_zulip ───────────────────────────────────────────────
+    case "upload_to_zulip": {
+      const content = String(args.content ?? "")
+      const fileName = String(args.file_name ?? "unnamed.txt")
+      const botEmail = String(args.bot_email ?? "")
+      if (!content) throw new Error("content is required")
+      if (!fileName) throw new Error("file_name is required")
+
+      // Use bot's credentials if provided (so file owner = bot, user can download)
+      let auth = authHeader
+      if (botEmail) {
+        const botAuth = getBotAuth(botEmail)
+        if (botAuth) auth = botAuth
+      }
+
+      const form = new FormData()
+      form.append("file", new Blob([content]), fileName)
+
+      const res = await fetch(`${ZULIP_URL}/api/v1/user_uploads`, {
+        method: "POST",
+        headers: {
+          Authorization: auth,
+          Host: ZULIP_HOST,
+        },
+        body: form,
+      })
+      if (!res.ok) {
+        const err = await res.text().catch(() => "")
+        throw new Error(`Zulip upload failed (HTTP ${res.status}): ${err.substring(0, 200)}`)
+      }
+      const json = await res.json()
+      if (json.result !== "success") throw new Error(json.msg ?? "Upload failed")
+
+      const uri = decodeURIComponent(json.uri)
+      const host = ZULIP_EXTERNAL_URL.replace(/\/+$/, "")
+      const link = uri.startsWith("http") ? uri : `${host}${uri.startsWith("/") ? "" : "/"}${uri}`
+      return { content: [{ type: "text", text: `✅ Файл загружен: ${link}` }] }
     }
 
     default:

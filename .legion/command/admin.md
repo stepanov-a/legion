@@ -2,7 +2,7 @@
 name: admin
 description: "Админские команды (создание ботов)"
 agent: general
-model: opencode-go/deepseek-v4-flash
+model: nti/deepseek-v4-flash
 allow: ["a.stepanov@2035.university"]
 mcp: {"bot-factory":true,"zulip-messages":true,"session-logger":true}
 ---

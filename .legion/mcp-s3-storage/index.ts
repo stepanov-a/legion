@@ -8,9 +8,9 @@ import {
   DeleteObjectCommand,
 } from "@aws-sdk/client-s3"
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
-
 const S3_ENDPOINT = process.env.S3_ENDPOINT
 if (!S3_ENDPOINT) { console.error("S3_ENDPOINT is required"); process.exit(1) }
+const S3_PUBLIC_ENDPOINT = process.env.S3_PUBLIC_ENDPOINT ?? S3_ENDPOINT.replace("host.docker.internal", "45.134.61.6")
 const S3_REGION = process.env.S3_REGION ?? "us-east-1"
 const S3_ACCESS_KEY = process.env.S3_ACCESS_KEY
 if (!S3_ACCESS_KEY) { console.error("S3_ACCESS_KEY is required"); process.exit(1) }
@@ -25,6 +25,23 @@ const client = new S3Client({
   credentials: { accessKeyId: S3_ACCESS_KEY, secretAccessKey: S3_SECRET_KEY },
   forcePathStyle: true,
 })
+const publicClient = S3_PUBLIC_ENDPOINT !== S3_ENDPOINT ? new S3Client({
+  region: S3_REGION,
+  endpoint: S3_PUBLIC_ENDPOINT,
+  credentials: { accessKeyId: S3_ACCESS_KEY, secretAccessKey: S3_SECRET_KEY },
+  forcePathStyle: true,
+}) : client
+
+// Zulip credentials for share links
+const ZULIP_URL = process.env.ZULIP_URL
+if (!ZULIP_URL) { console.error("ZULIP_URL is required"); process.exit(1) }
+const ZULIP_EMAIL = process.env.ZULIP_EMAIL
+if (!ZULIP_EMAIL) { console.error("ZULIP_EMAIL is required"); process.exit(1) }
+const ZULIP_API_KEY = process.env.ZULIP_API_KEY
+if (!ZULIP_API_KEY) { console.error("ZULIP_API_KEY is required"); process.exit(1) }
+const ZULIP_HOST = process.env.ZULIP_API_HOST ?? ""
+const zulipAuth = "Basic " + Buffer.from(`${ZULIP_EMAIL}:${ZULIP_API_KEY}`).toString("base64")
+const ZULIP_EXTERNAL_URL = process.env.ZULIP_EXTERNAL_URL ?? `https://${ZULIP_HOST.replace(/:80$/, "")}`.replace(/\/+$/, "")
 
 const log = (msg: string) => process.stderr.write(msg + "\n")
 
@@ -108,8 +125,9 @@ const tools = [
       properties: {
         path: { type: "string", description: "File path in bucket" },
         expiry: { type: "integer", description: "Expiry in seconds", default: 3600 },
+        bot_email: { type: "string", description: "Your bot email to upload as yourself (required for users to be able to download)" },
       },
-      required: ["path"],
+      required: ["path", "bot_email"],
     },
   },
 ]
@@ -128,7 +146,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
         Body: content,
         ContentType: contentType,
       }))
-      return { content: [{ type: "text", text: `✅ Written ${content.length} bytes to \`${path}\`` }] }
+      return { content: [{ type: "text", text: `✅ Written ${content.length} bytes to \`${path}\`. Teперь вызови get_share_link с path="${path}" чтобы получить ссылку для скачивания.` }] }
     }
 
     // ── read_file ─────────────────────────────────────────────────────
@@ -179,9 +197,57 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
 
     // ── get_share_link ────────────────────────────────────────────────
     case "get_share_link": {
-      const expiry = Number(args.expiry ?? 3600)
-      const url = await getSignedUrl(client, new GetObjectCommand({ Bucket: S3_BUCKET, Key: path }), { expiresIn: expiry })
-      return { content: [{ type: "text", text: url }] }
+      const fileName = path.split("/").pop() ?? "file"
+      const ext = fileName.includes(".") ? fileName.split(".").pop()?.toLowerCase() : ""
+      const viewableTypes = ["html", "htm", "pdf", "svg", "txt", "md"]
+
+      // For viewable files (HTML, PDF) use S3 presigned URL with attachment
+      if (viewableTypes.includes(ext ?? "")) {
+        const expiry = Number(args.expiry ?? 604800)
+        const getCmd = new GetObjectCommand({
+          Bucket: S3_BUCKET,
+          Key: path,
+          ResponseContentDisposition: `attachment; filename="${fileName}"`,
+        })
+        const link = await getSignedUrl(client, getCmd, { expiresIn: expiry })
+        return { content: [{ type: "text", text: link }] }
+      }
+
+      // For binary files (PPTX, XLSX, etc.) upload to Zulip
+      const obj = await client.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: path }))
+      const buf = await obj.Body!.transformToByteArray()
+      const botEmail = args.bot_email ? String(args.bot_email) : ""
+
+      let auth = zulipAuth
+      if (botEmail) {
+        const botsPath = "/legion/.legion/bots.jsonc"
+        try {
+          const raw = JSON.parse(require("fs").readFileSync(botsPath, "utf-8"))
+          const bot = (raw.bots ?? []).find((b: any) => b.zulip_email === botEmail)
+          if (bot?.zulip_api_key) {
+            auth = "Basic " + Buffer.from(`${botEmail}:${bot.zulip_api_key}`).toString("base64")
+          }
+        } catch {}
+      }
+
+      const form = new FormData()
+      form.append("file", new Blob([buf]), fileName)
+      const res = await fetch(`${ZULIP_URL}/api/v1/user_uploads`, {
+        method: "POST",
+        headers: { Authorization: auth, Host: ZULIP_HOST },
+        body: form,
+      })
+      if (!res.ok) {
+        const err = await res.text().catch(() => "")
+        throw new Error(`Upload failed (HTTP ${res.status}): ${err.substring(0, 200)}`)
+      }
+      const json = await res.json()
+      if (json.result !== "success") throw new Error(json.msg ?? "Upload to Zulip failed")
+
+      const uri = decodeURIComponent(json.uri)
+      const host = ZULIP_EXTERNAL_URL.replace(/\/+$/, "")
+      const link = uri.startsWith("http") ? uri : `${host}${uri.startsWith("/") ? "" : "/"}${uri}`
+      return { content: [{ type: "text", text: link }] }
     }
 
     default:

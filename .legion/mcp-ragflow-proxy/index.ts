@@ -99,20 +99,18 @@ async function apiCall(path: string, init?: RequestInit): Promise<any> {
 }
 
 async function getAllDatasetIds(): Promise<string[]> {
-  const body = await apiCall("/api/v1/datasets")
-  const data = body.data ?? []
-  return (Array.isArray(data) ? data : data.docs ?? []).map((d: any) => d.id)
+  const all = await fetchItems("/api/v1/datasets", "datasets")
+  return all.map((d: any) => d.id)
 }
 
 async function ensureDataset(name: string): Promise<{ id: string; created: boolean }> {
-  const body = await apiCall("/api/v1/datasets")
-  const datasets = Array.isArray(body.data) ? body.data : body.data?.docs ?? []
-  const existing = datasets.find((d: any) => d.name === name)
+  const allDatasets = await fetchItems("/api/v1/datasets", "datasets")
+  const existing = allDatasets.find((d: any) => d.name === name)
   if (existing) return { id: existing.id, created: false }
 
   const createBody = await apiCall("/api/v1/datasets", {
     method: "POST",
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, permission: "team" }),
   })
   const newId = Array.isArray(createBody.data) ? createBody.data[0]?.id : createBody.data?.id
   return { id: newId, created: true }
@@ -133,6 +131,7 @@ const tools = [
         dataset_id: { type: "string", description: "Dataset ID" },
         page: { type: "integer", description: "Page number", default: 1 },
         page_size: { type: "integer", description: "Results per page", default: 30 },
+        fetch_all: { type: "boolean", description: "Fetch all pages instead of a single page", default: false },
       },
       required: ["dataset_id"],
     },
@@ -271,6 +270,17 @@ const tools = [
       },
     },
     {
+      name: "reindex_pending",
+      description: "Find all documents with UNSTART status across all datasets and trigger parsing/indexing. Returns count of triggered documents per dataset.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          dataset_ids: { type: "array", items: { type: "string" }, description: "Restrict to specific dataset IDs. If omitted, reindexes across all datasets" },
+        },
+        required: [],
+      },
+    },
+    {
       name: "export_wiki",
     description: "Export all chunks as markdown files (one file per document) with frontmatter metadata. No entity extraction — that is handled by build_cards via LLM",
     inputSchema: {
@@ -288,11 +298,15 @@ const tools = [
 async function handleToolCall(name: string, args: Record<string, unknown>): Promise<unknown> {
   switch (name) {
     case "list_datasets": {
-      const body = await apiCall("/api/v1/datasets")
-      return { content: [{ type: "text", text: formatDatasets(body.data) }] }
+      const all = await fetchItems("/api/v1/datasets", "datasets")
+      return { content: [{ type: "text", text: formatDatasets(all) }] }
     }
     case "list_documents": {
-      const { dataset_id, page = 1, page_size = 30 } = args as any
+      const { dataset_id, page = 1, page_size = 30, fetch_all = false } = args as any
+      if (fetch_all) {
+        const all = await fetchItems(`/api/v1/datasets/${dataset_id}/documents`, "docs")
+        return { content: [{ type: "text", text: formatDocuments(all) }] }
+      }
       const body = await apiCall(`/api/v1/datasets/${dataset_id}/documents?page=${page}&page_size=${page_size}`)
       return { content: [{ type: "text", text: formatDocuments(body.data) }] }
     }
@@ -321,7 +335,7 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
     }
     case "create_dataset": {
       const { name } = args as any
-      const body = await apiCall("/api/v1/datasets", { method: "POST", body: JSON.stringify({ name }) })
+      const body = await apiCall("/api/v1/datasets", { method: "POST", body: JSON.stringify({ name, permission: "team" }) })
       const newId = Array.isArray(body.data) ? body.data[0]?.id : body.data?.id
       return { content: [{ type: "text", text: `✅ Dataset "${name}" created. ID: ${newId}` }] }
     }
@@ -389,7 +403,14 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
       }
       const body = await res.json()
       if (body.code !== 0) throw new Error(body.message)
-      return { content: [{ type: "text", text: `✅ Uploaded: ${file_name} (id: ${body.data?.[0]?.id ?? "ok"})` }] }
+      const docId = body.data?.[0]?.id
+      if (docId) {
+        await apiCall(`/api/v1/datasets/${dataset_id}/chunks`, {
+          method: "POST",
+          body: JSON.stringify({ document_ids: [docId], run: "1" }),
+        }).catch(() => {})
+      }
+      return { content: [{ type: "text", text: `✅ Uploaded: ${file_name}${docId ? ` (id: ${docId})` : ""}` }] }
     }
     case "chat_completion": {
       const { chat_id, question, stream = false } = args as any
@@ -399,6 +420,34 @@ async function handleToolCall(name: string, args: Record<string, unknown>): Prom
     case "list_chats": {
       const body = await apiCall("/api/v1/chats")
       return { content: [{ type: "text", text: formatChats(body.data) }] }
+    }
+    case "reindex_pending": {
+      const { dataset_ids } = args as any
+      let datasets: any[]
+      if (dataset_ids?.length) {
+        datasets = (await apiCall("/api/v1/datasets")).data?.filter((d: any) => dataset_ids.includes(d.id)) ?? []
+      } else {
+        datasets = (await apiCall("/api/v1/datasets")).data ?? []
+      }
+      if (!datasets.length) return { content: [{ type: "text", text: "No datasets found." }] }
+      const results: string[] = []
+      let total = 0
+      for (const ds of datasets) {
+        const docs = (await apiCall(`/api/v1/datasets/${ds.id}/documents?page=1&page_size=500`)).data
+        const pending = (extractDocs(docs) ?? []).filter((d: any) => d.run === "UNSTART")
+        if (!pending.length) continue
+        const ids = pending.map((d: any) => d.id)
+        await apiCall(`/api/v1/datasets/${ds.id}/chunks`, {
+          method: "POST",
+          body: JSON.stringify({ document_ids: ids, run: "1" }),
+        })
+        results.push(`${ds.name}: ${ids.length} docs triggered`)
+        total += ids.length
+      }
+      const msg = results.length
+        ? `Reindexing triggered for ${total} documents:\n${results.join("\n")}`
+        : "No pending documents found."
+      return { content: [{ type: "text", text: msg }] }
     }
     case "export_wiki": {
       return await handleExportWiki(args as any)
@@ -461,14 +510,20 @@ function formatChats(data: any[]): string {
 async function fetchItems(baseUrl: string, dataKey: string, pageSize = 100): Promise<any[]> {
   const all: any[] = []
   let page = 1
+  let size = pageSize
   for (let i = 0; i < 50; i++) {
     const sep = baseUrl.includes("?") ? "&" : "?"
-    const body = await apiCall(`${baseUrl}${sep}page=${page}&page_size=${pageSize}`)
+    const body = await apiCall(`${baseUrl}${sep}page=${page}&page_size=${size}`)
     const items = extractDocs(body.data) ?? body.data?.[dataKey] ?? []
-    if (!items.length) break
+    if (!items.length) {
+      // If page is empty, try smaller page_size (API may have size limits)
+      if (size > 10) { size = Math.floor(size / 2); continue }
+      break
+    }
     all.push(...items)
-    if (items.length < pageSize) break
+    if (items.length < size) break
     page++
+    size = pageSize // reset size for next page
   }
   return all
 }
